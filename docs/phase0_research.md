@@ -115,6 +115,7 @@ in the 5 sample saves (`python research/conventions.py`):
 | Wall heights 400 (8×4) / 100 (8×1) | stacked walls at +400 / +100 | **measured** |
 | Ramp origin = centre of its bounding box; footprint 800×800 | same-height foundation neighbours at dz = 0 | **measured** |
 | Ramp **high end at local −X** | foundation flush with ramp top lies at −X: 829/963 (8×4), 559/592 (8×2) | **measured** |
+| Quaternions rotate as v' = R(q)·v with the standard (x,y,z,w) formula | with this convention the ramp high end comes out at −X for every yaw; the inverse convention splits 186/173 between +X and −X | **measured** |
 | Belt spline height above surface | 100 cm (59.5k points) or 300 cm (12.3k): **belts on poles float above the floor** | measured, but your cube may differ |
 | Sign front normal = local +Y (pointing away from the wall), up = local +Z | 56/70 and 6/6 wall-mounted signs | **measured** |
 | Sign origin is horizontally centred | two 4 m signs side by side at y = ±200 on one 8 m wall | **measured** (for SmallVeryWide) |

@@ -13,6 +13,40 @@ def cmd_sniff(args: argparse.Namespace) -> int:
     return 0
 
 
+def _bbox(text: str | None):
+    if not text:
+        return None
+    vals = [float(v) for v in text.split(",")]
+    if len(vals) != 6:
+        raise SystemExit("--bbox expects xmin,ymin,zmin,xmax,ymax,zmax")
+    return vals
+
+
+def cmd_synth(args: argparse.Namespace) -> int:
+    from .sources.synthetic import SyntheticCubeSource
+
+    build = SyntheticCubeSource(n=args.n, foundation=args.foundation, features=not args.no_features).read()
+    build.save(args.output)
+    print(f"wrote {args.output}: {len(build.objects)} objects (game frame)")
+    return 0
+
+
+def cmd_normalize(args: argparse.Namespace) -> int:
+    """Phase 1 shape: any source -> selection -> model frame -> intermediate JSON."""
+    from .coords import to_model_frame
+    from .sources.base import open_source, select_objects
+
+    build = open_source(args.input).read()
+    if args.bbox:
+        build = select_objects(build, bbox=_bbox(args.bbox))
+    out = to_model_frame(build)
+    out.save(args.output)
+    print(f"wrote {args.output}: {len(out.objects)} objects, frame=model (mm, right-handed, Z-up)")
+    for cls, n in out.class_counts().items():
+        print(f"  {n:6d}  {cls}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="megacube", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -21,6 +55,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("file")
     s.add_argument("--depth", type=int, default=4, help="maximum number of decoding layers to peel")
     s.set_defaults(func=cmd_sniff)
+
+    s = sub.add_parser("synth", help="write the synthetic test cube (game frame) as megacube JSON")
+    s.add_argument("-o", "--output", default="synthetic_raw.json")
+    s.add_argument("--n", type=int, default=6, help="foundations per cube edge")
+    s.add_argument("--foundation", default="Build_Foundation_8x1_01_C")
+    s.add_argument("--no-features", action="store_true", help="bare cube without belts/signs")
+    s.set_defaults(func=cmd_synth)
+
+    s = sub.add_parser("normalize", help="read a build (synthetic, .json, .sav) and write the intermediate JSON")
+    s.add_argument("input", help="'synthetic', 'synthetic:n=4', a megacube JSON, or a .sav (Phase 1)")
+    s.add_argument("-o", "--output", default="build.json")
+    s.add_argument("--bbox", help="keep objects with origin inside xmin,ymin,zmin,xmax,ymax,zmax (game cm)")
+    s.set_defaults(func=cmd_normalize)
     return p
 
 

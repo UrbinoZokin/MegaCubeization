@@ -125,6 +125,31 @@ def ramps(ds: Dataset):
               f"side where a foundation is flush with the ramp's top: {top_flush.most_common(4)}")
 
 
+def quaternion_convention(ds: Dataset):
+    """Is the save's quaternion applied as v' = R(q) v (standard) or as its inverse?
+
+    Ramps are asymmetric, so the side of the high end must come out the same for every yaw.
+    Only the correct convention is consistent at 90/270 degrees.
+    """
+    print("\n## Quaternion convention check (ramp high-end side by yaw)")
+    iF = ds.idx(FOUNDATION_H)
+    treeF = cKDTree(ds.P[iF])
+    for name, h in RAMP_H.items():
+        ir = ds.idx([name])
+        RR = quat_to_mat(ds.Q[ir])
+        votes = {"standard": collections.Counter(), "inverse": collections.Counter()}
+        for k, a in enumerate(ir):
+            for j in treeF.query_ball_point(ds.P[a], 900):
+                w = ds.P[iF[j]] - ds.P[a]
+                for conv, M in (("standard", RR[k].T), ("inverse", RR[k])):
+                    d = M @ w
+                    if not (abs(np.hypot(d[0], d[1]) - 800) < 1 and (abs(d[0]) < 1 or abs(d[1]) < 1)):
+                        continue
+                    if abs((d[2] + FOUNDATION_H[ds.cls[iF[j]]] / 2) - h / 2) < 1:
+                        votes[conv]["+X" if d[0] > 400 else "-X" if d[0] < -400 else "+Y" if d[1] > 400 else "-Y"] += 1
+        print(f"{name}: standard {votes['standard'].most_common(2)} | inverse {votes['inverse'].most_common(2)}")
+
+
 def conveyors(ds: Dataset):
     print("\n## Belts and lifts relative to the foundation top surface")
     iF = ds.idx(FOUNDATION_H)
@@ -192,5 +217,6 @@ if __name__ == "__main__":
     foundations(ds)
     walls_on_foundations(ds)
     ramps(ds)
+    quaternion_convention(ds)
     conveyors(ds)
     signs(ds)
