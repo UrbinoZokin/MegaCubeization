@@ -1,0 +1,64 @@
+# Pipeline parameters. Lengths are PRINTED millimetres unless the key says otherwise.
+# Override any value on the command line: --set hollow.wall=2.4 --set split.mode=panels
+
+scale:
+  max_dimension: 240          # longest side of the assembled model (mm)
+  build_volume: [256, 256, 256]  # Bambu X1C
+
+align: none                   # none | auto: rotate so the dominant building axes line up with X/Y/Z
+snap:                         # clean up float noise on structural pieces so touching faces coincide exactly
+  position_cm: 1.0            # round positions to this grid (game cm, relative to the first piece); 0 = off
+  rotation_deg: 0.05          # snap rotations within this angle of a 90-degree orientation; 0 = off
+weld_model_mm: 0.0            # TRUE-SCALE mm (1 game cm = 10 mm) to grow structural pieces by. Only for
+                              # real gaps that snapping can't close; overlapping faces leave sliver triangles
+
+light:
+  min_width: 1.2              # belts/lifts/signs are exaggerated up to these printed sizes
+  min_thickness: 0.8
+  attach: snap                # none | snap (move onto the surface) | extend (grow down to the surface)
+  attach_max_gap: 8.0         # elements farther than this from the body are left alone (warning)
+  embed: 0.3                  # sink attached elements into the body so the two materials interlock
+  spline_max_segment: 1.0     # belt sampling: max printed segment length ...
+  spline_max_angle_deg: 6     # ... and max turn per segment
+
+windows:
+  mode: fill                  # none | hole (open slot behind the element) | fill (slot filled with translucent material)
+  inset: 0.5                  # window is this much narrower than the element on each side
+  margin: 0.4                 # window reaches this far past the inner surface
+  max_depth: 30.0             # longest light pipe allowed (one-piece pyramid roofs make long ones)
+
+hollow:
+  enabled: true
+  wall: 3.0                   # shell thickness
+  roof: auto                  # auto | flat | pyramid. auto: pyramid for split.mode=one (no internal supports), else flat
+  core: box                   # box: hollow only inside the six dominant outer face planes, so things standing
+                              # on a face (ramps, walls) stay solid instead of becoming pockets; none: hollow all
+
+dark_layer:
+  enabled: false              # inner part of the shell in a dark filament to stop light bleeding through walls
+  thickness: 0.8
+
+led_opening:
+  enabled: true
+  shape: circle               # circle | rect
+  size: [40, 40]              # diameter (circle) or width x depth (rect)
+  offset: [0, 0]              # from the centre of the bottom face
+
+split:
+  mode: box_lid               # one | box_lid | panels
+  clearance: 0.15             # per side, pins vs sockets
+  pin_size: 2.0               # box_lid: round pin diameter; panels: diamond pin width (auto-shrunk to fit the wall)
+  pin_length: 2.5
+  pins_per_edge: 2            # panels: pins per joint; box_lid: one per corner post
+  corner_post: 8.0            # box_lid: square posts inside the box corners that carry the pins
+  min_skin: 0.6               # material left between a socket and the outer surface
+
+checks:
+  min_wall: 0.8               # 0.4 mm nozzle: report walls thinner than this ...
+  min_gap: 0.4                # ... and gaps narrower than this
+  overhang_deg: 45            # downward faces steeper than this need support
+  samples: 60000              # surface samples for the thickness/gap scan
+
+preview:
+  size: [1000, 1000]
+  views: [iso_ne, iso_sw, iso_nw_low, top]

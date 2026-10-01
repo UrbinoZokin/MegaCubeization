@@ -119,10 +119,10 @@ class SyntheticCubeSource:
         for x in (-2000.0, 2000.0):
             add("Build_ConveyorPole_C", _tf(identity, (x, -1200.0, top)))
         add_belt("Build_ConveyorBeltMk3_C",
-                 [np.array((-2400.0, 800.0, z)), np.array((0.0, 800.0, z)), np.array((800.0, 1600.0, z)),
-                  np.array((800.0, 2800.0, z))], (0, 0, 1),
+                 [np.array((-2000.0, 400.0, z)), np.array((0.0, 400.0, z)), np.array((800.0, 1200.0, z)),
+                  np.array((800.0, 2000.0, z))], (0, 0, 1),
                  arcs={1: {"start_dir": np.array((1.0, 0, 0)), "end_dir": np.array((0, 1.0, 0))}})
-        for p in ((-2400.0, 800.0), (800.0, 2800.0)):
+        for p in ((-2000.0, 400.0), (800.0, 2000.0)):
             add("Build_ConveyorPole_C", _tf(identity, (*p, top)))
 
         # +X face: belt lying on the face (SCIM-style rotation, local up = +X), 20 cm off the surface.

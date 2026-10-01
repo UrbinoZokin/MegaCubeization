@@ -60,6 +60,26 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_build(args: argparse.Namespace) -> int:
+    import logging
+
+    from .config import load_config
+    from .mapping import load_mapping
+    from .pipeline import run
+
+    logging.basicConfig(level=logging.INFO if args.verbose else logging.ERROR, format="%(levelname)s %(message)s")
+    cfg = load_config(args.config, args.set)
+    report = run(args.input, args.out, load_mapping(args.classes), cfg)
+    geo = report["geometry"]
+    cov = report["coverage"]
+    print(f"coverage: {100 * cov['mapped_fraction']:.1f}% mapped, unmapped: {cov['unmapped_classes'] or 'none'}")
+    print(f"scale {geo['scale']:.6f} (1 game metre = {geo['scale'] * 1000:.3f} mm); printed size {geo['printed_extent_mm']} mm")
+    for w in geo["warnings"]:
+        print(f"WARNING: {w}")
+    print(f"outputs in {args.out}: {', '.join(report['files'].values())}, report.json, coverage.txt")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="megacube", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -87,6 +107,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--classes", help="class mapping YAML (default: config/classes.yaml)")
     s.add_argument("--json", help="also write the report as JSON")
     s.set_defaults(func=cmd_coverage)
+
+    s = sub.add_parser("build", help="generate printable geometry (Phases 3-5)")
+    s.add_argument("input", help="'synthetic', a megacube JSON (either frame), later a .sav")
+    s.add_argument("-o", "--out", default="out", help="output directory")
+    s.add_argument("--config", help="pipeline YAML overriding config/pipeline.yaml")
+    s.add_argument("--classes", help="class mapping YAML (default: config/classes.yaml)")
+    s.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                   help="override a pipeline setting, e.g. --set hollow.wall=2.4 (repeatable)")
+    s.add_argument("-v", "--verbose", action="store_true")
+    s.set_defaults(func=cmd_build)
     return p
 
 
