@@ -1,0 +1,169 @@
+# Class -> primitive mapping (Phase 2).
+#
+# Every placed object's class name is matched against `rules` in order; the first rule whose
+# `match` regex fully matches wins. No rule -> handled by `unmapped` below (logged, counted, and
+# drawn as a placeholder box in the separate debug output: never silently dropped).
+#
+# Units and frame: GAME-LOCAL centimetres, i.e. the object's own Unreal frame
+# (X forward, Y right, Z up, left-handed). The pipeline converts to millimetres / right-handed.
+#
+#   size    primitive bounding box [X, Y, Z] in cm
+#   offset  where the primitive's bounding-box centre sits relative to the object's origin (pivot)
+#   group   body (opaque) | light (translucent) | exclude (deliberately not printed)
+#   verified:
+#     measured    pivot/size/axes measured from public saves (docs/phase0_research.md section 5)
+#     partial     some aspects measured, the rest assumed (see notes)
+#     unverified  assumption: check the preview against the game before trusting it
+#
+# Primitives: box | hull (convex hull of `points`, normalised to the bbox, i.e. -0.5..0.5) |
+#             extrude (2D `profile` in X/Z, normalised, extruded along Y) | belt | lift | panel
+
+version: 1
+
+unmapped:
+  policy: exclude            # exclude (warn + debug placeholder) | body (placeholder joins the body)
+  placeholder_size: [100, 100, 100]
+
+point_sets:
+  # Ramp: flat bottom; top slopes from the high end at local -X down to the bottom at +X.
+  wedge_high_at_neg_x: [[-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5],
+                        [-0.5, -0.5, 0.5], [-0.5, 0.5, 0.5]]
+  # Inverted ramp: flat top; bottom slopes, thick end at local -X. (Orientation unverified.)
+  inverted_wedge_thick_at_neg_x: [[-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5],
+                                  [-0.5, -0.5, -0.5], [-0.5, 0.5, -0.5]]
+  # Outer ("up") corner ramp: high only at the (-X, -Y) corner. (Shape unverified.)
+  corner_up: [[-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5], [-0.5, -0.5, 0.5]]
+  # Inner ("down") corner ramp: high along the -X and -Y edges. (Shape unverified.)
+  corner_down: [[-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5],
+                [-0.5, -0.5, 0.5], [-0.5, 0.5, 0.5], [0.5, -0.5, 0.5]]
+  # Triangular wall: full height at -Y, zero at +Y. (Orientation unverified.)
+  tri_wall: [[-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [-0.5, 0.5, -0.5], [0.5, 0.5, -0.5],
+             [-0.5, -0.5, 0.5], [0.5, -0.5, 0.5]]
+
+profiles:
+  # Quarter pipe cross-section in X/Z: solid below a concave quarter circle, high at -X. (Unverified.)
+  quarter_pipe: [[-0.5, -0.5], [0.5, -0.5], [0.5, -0.45], [0.2588, -0.4159], [0.0, -0.366], [-0.2071, -0.2071],
+                 [-0.366, 0.0], [-0.4659, 0.2412], [-0.5, 0.5]]
+
+rules:
+  # ------------------------------------------------------------------ foundations
+  # 800 x 800 footprint, origin at the bounding-box centre (measured on Build_Foundation_8x*_01_C and
+  # the Concrete / ConcretePolished / Asphalt variants).
+  - {name: foundation_8x1, match: '^Build_Foundation_(?:[A-Za-z]+_)?8x1(?:_\d+)?_C$', primitive: box,
+     size: [800, 800, 100], group: body, verified: measured}
+  - {name: foundation_8x2, match: '^Build_Foundation_(?:[A-Za-z]+_)?8x2(?:_\d+)?_C$', primitive: box,
+     size: [800, 800, 200], group: body, verified: measured,
+     notes: 'Build_Foundation_ConcretePolished_8x2_2_C snaps one level up; same box assumed'}
+  - {name: foundation_8x4, match: '^Build_Foundation_(?:[A-Za-z]+_)?8x4(?:_\d+)?_C$', primitive: box,
+     size: [800, 800, 400], group: body, verified: measured}
+  - {name: foundation_glass, match: '^Build_FoundationGlass_01_C$', primitive: box,
+     size: [800, 800, 100], group: body, verified: measured, notes: 'snaps flush with 8x1 foundations'}
+  - {name: foundation_frame, match: '^Build_Foundation_Frame_01_C$', primitive: box,
+     size: [800, 800, 400], group: body, verified: unverified,
+     notes: 'lattice frame printed as a solid box; height not confirmed'}
+  - {name: flat_frame, match: '^Build_Flat_Frame_01_C$', primitive: box,
+     size: [800, 800, 100], group: body, verified: unverified}
+
+  # ------------------------------------------------------------------ ramps (wedges)
+  # Measured on Build_Ramp_8x*_01_C and the Asphalt / Concrete / Polished variants: origin at the
+  # bounding-box centre, 800 x 800 footprint, high end at local -X. Order matters: specific rules first.
+  - {name: ramp_diagonal, match: '^Build_Ramp_Diagonal_8x[124]_0[12]_C$', primitive: hull, points: corner_up,
+     size: [800, 800, 400], group: body, verified: unverified}
+  - {name: ramp_8x1, match: '^Build_Ramp_(?:[A-Za-z]+_)?8x1(?:_01)?_C$', primitive: hull, points: wedge_high_at_neg_x,
+     size: [800, 800, 100], group: body, verified: measured}
+  - {name: ramp_8x2, match: '^Build_Ramp_(?:[A-Za-z]+_)?8x2(?:_01)?_C$', primitive: hull, points: wedge_high_at_neg_x,
+     size: [800, 800, 200], group: body, verified: measured}
+  - {name: ramp_8x4, match: '^Build_Ramp_(?:[A-Za-z]+_)?8x4(?:_01)?_C$', primitive: hull, points: wedge_high_at_neg_x,
+     size: [800, 800, 400], group: body, verified: measured}
+  - {name: ramp_frame, match: '^Build_Ramp_Frame_01_C$', primitive: hull, points: wedge_high_at_neg_x,
+     size: [800, 800, 400], group: body, verified: unverified}
+  - {name: ramp_8x8x8, match: '^Build_Ramp_8x8x8_C$', primitive: hull, points: wedge_high_at_neg_x,
+     size: [800, 800, 800], group: body, verified: unverified}
+  - {name: ramp_double_8x1, match: '^Build_RampDouble_(?:[A-Za-z]+_)?8x1_C$|^Build_RampDouble_C$', primitive: hull,
+     points: wedge_high_at_neg_x, size: [800, 800, 200], group: body, verified: unverified,
+     notes: 'double ramp geometry unknown; modelled as a wedge rising twice the nominal height'}
+  - {name: ramp_double_8x2, match: '^Build_RampDouble_(?:[A-Za-z]+_)?8x2_C$', primitive: hull,
+     points: wedge_high_at_neg_x, size: [800, 800, 400], group: body, verified: unverified}
+  - {name: ramp_double_8x4, match: '^Build_RampDouble_(?:[A-Za-z]+_)?8x4_C$', primitive: hull,
+     points: wedge_high_at_neg_x, size: [800, 800, 800], group: body, verified: unverified}
+  - {name: ramp_inverted_8x1, match: '^Build_(?:InvertedRamp_[A-Za-z]+_8x1|RampInverted_8x1)_C$', primitive: hull,
+     points: inverted_wedge_thick_at_neg_x, size: [800, 800, 100], group: body, verified: partial,
+     notes: 'origin at bbox centre measured on InvertedRamp_Concrete_8x4; slope direction unverified'}
+  - {name: ramp_inverted_8x2, match: '^Build_(?:InvertedRamp_[A-Za-z]+_8x2|RampInverted_8x2_01)_C$', primitive: hull,
+     points: inverted_wedge_thick_at_neg_x, size: [800, 800, 200], group: body, verified: partial}
+  - {name: ramp_inverted_8x4, match: '^Build_(?:InvertedRamp_[A-Za-z]+_8x4|Ramp_8x4_Inverted_01|Ramp_Frame_Inverted_01)_C$',
+     primitive: hull, points: inverted_wedge_thick_at_neg_x, size: [800, 800, 400], group: body, verified: partial}
+  - {name: ramp_corner_up, match: '^Build_Ramp_UpCorner_[A-Za-z]+_8x[124]_C$|^Build_InvertedRamp_UCorner_[A-Za-z]+_8x[124]_C$',
+     primitive: hull, points: corner_up, size: [800, 800, 400], group: body, verified: unverified,
+     notes: 'height taken as 4 m for all corner ramps (not read from the name)'}
+  - {name: ramp_corner_down, match: '^Build_Ramp_DownCorner_[A-Za-z]+_8x[124]_C$|^Build_InvertedRamp_DCorner_[A-Za-z]+_8x[124]_C$|^Build_RampInverted_8x[124]_Corner_0[12]_C$',
+     primitive: hull, points: corner_down, size: [800, 800, 400], group: body, verified: unverified}
+  - {name: stairs, match: '^Build_Stair_[A-Za-z]+_8x[124](?:_01)?_C$', primitive: hull, points: wedge_high_at_neg_x,
+     size: [800, 800, 400], group: body, verified: unverified, notes: 'steps printed as a smooth wedge'}
+
+  # ------------------------------------------------------------------ quarter pipes (curved)
+  - {name: quarter_pipe, match: '^Build_(?:Down)?QuarterPipe(?:Middle)?(?:_[A-Za-z]+)?_(?:8x[124]|0\d)_C$|^Build_QuarterPipe(?:_02)?_C$',
+     primitive: extrude, profile: quarter_pipe, size: [800, 800, 400], group: body, verified: unverified}
+  - {name: quarter_pipe_corners, match: '^Build_(?:Down)?QuarterPipe(?:Middle)?(?:In|Out)?Corner(?:_[A-Za-z]+)?_(?:[48]x[124]|0\d)_C$',
+     primitive: box, size: [800, 800, 400], group: body, verified: unverified, notes: 'curved corner printed as a box'}
+
+  # ------------------------------------------------------------------ walls
+  # Measured: origin at the bottom centre on the foundation edge line; width along local Y,
+  # thickness along local X. Wall THICKNESS is not stored anywhere: 50 cm is an assumption.
+  - {name: wall_window_8x4, match: '^Build_(?:Wall_Window(?:_Thin)?_8x4_0\d|Wall_Concrete_8x4_Window_0\d|SteelWall_8x4_Window_0\d)_C$',
+     primitive: box, size: [50, 800, 400], offset: [0, 0, 200], group: body, verified: partial,
+     notes: 'printed solid: window openings not modelled (could become light inlays later)'}
+  - {name: wall_8x4, match: '^Build_(?:Wall_(?:[A-Za-z]+_)?8x4_0\d|Wall_Concrete_8x4|SteelWall_8x4_Gate_01|Wall_Concrete_(?:CDoor|SDoor|Gate)_8x4|Wall_(?:Door|Conveyor)_8x4_0\d(?:_Steel)?|Wall_Gate_8x4_01|Wall_Concrete_8x4_ConveyorHole_0\d)_C$',
+     primitive: box, size: [50, 800, 400], offset: [0, 0, 200], group: body, verified: partial,
+     notes: 'pivot/width/height measured; thickness assumed; door/gate/conveyor openings not modelled'}
+  - {name: wall_8x1, match: '^Build_(?:Wall_(?:Orange|Concrete)_8x1|SteelWall_8x1)_C$',
+     primitive: box, size: [50, 800, 100], offset: [0, 0, 50], group: body, verified: partial}
+  - {name: wall_frame, match: '^Build_Wall_Frame_01_C$', primitive: box, size: [50, 800, 400], offset: [0, 0, 200],
+     group: body, verified: unverified}
+  - {name: wall_tris_8x1, match: '^Build_(?:Wall_[A-Za-z]+_|SteelWall_)(?:Flip)?Tris_8x1_C$', primitive: hull, points: tri_wall,
+     size: [50, 800, 100], offset: [0, 0, 50], group: body, verified: unverified}
+  - {name: wall_tris_8x2, match: '^Build_(?:Wall_[A-Za-z]+_|SteelWall_)(?:Flip)?Tris_8x2_C$', primitive: hull, points: tri_wall,
+     size: [50, 800, 200], offset: [0, 0, 100], group: body, verified: unverified}
+  - {name: wall_tris_8x4, match: '^Build_(?:Wall_[A-Za-z]+_|SteelWall_)(?:Flip)?Tris_8x4_C$', primitive: hull, points: tri_wall,
+     size: [50, 800, 400], offset: [0, 0, 200], group: body, verified: unverified}
+  - {name: wall_tris_8x8, match: '^Build_(?:Wall_[A-Za-z]+_|SteelWall_)(?:Flip)?Tris_8x8_C$', primitive: hull, points: tri_wall,
+     size: [50, 800, 800], offset: [0, 0, 400], group: body, verified: unverified}
+  - {name: wall_angular_corner_8x4, match: '^Build_(?:Wall_[A-Za-z]+_Angular_8x4|Wall_[A-Za-z]+_8x4_Corner_0?\d|WallSet_Steel_Angular_8x4)_C$',
+     primitive: box, size: [50, 800, 400], offset: [0, 0, 200], group: body, verified: unverified,
+     notes: 'angled/corner walls printed as straight walls'}
+  - {name: wall_angular_corner_8x8, match: '^Build_(?:Wall_[A-Za-z]+_Angular_8x8|Wall_[A-Za-z]+_8x8_Corner_0?\d|WallSet_Steel_Angular_8x8)_C$',
+     primitive: box, size: [50, 800, 800], offset: [0, 0, 400], group: body, verified: unverified}
+
+  # ------------------------------------------------------------------ light: belts, lifts, signs
+  # Spline data comes from the save; the belt CROSS-SECTION is not stored anywhere (assumed).
+  - {name: conveyor_belt, match: '^Build_ConveyorBeltMk\d+_C$', primitive: belt,
+     width: 120, thickness: 20, top_offset: 0, group: light, verified: unverified,
+     notes: 'cross-section assumed; printed size is clamped up to pipeline.light.min_* anyway'}
+  - {name: conveyor_lift, match: '^Build_ConveyorLiftMk\d+_C$', primitive: lift, footprint: [200, 200],
+     group: light, verified: partial, notes: 'height from mTopTransform (measured); footprint assumed'}
+  # Signs: size is implied by the class (not stored). Front = local +Y, up = local +Z, origin centred
+  # horizontally (measured on wall-mounted signs); panel sizes and the vertical origin are assumptions.
+  - {name: sign_label_2m, match: '^Build_StandaloneWidgetSign_Small_C$', primitive: panel, size: [200, 50],
+     thickness: 10, group: light, verified: unverified}
+  - {name: sign_label_3m, match: '^Build_StandaloneWidgetSign_SmallWide_C$', primitive: panel, size: [300, 50],
+     thickness: 10, group: light, verified: unverified}
+  - {name: sign_label_4m, match: '^Build_StandaloneWidgetSign_SmallVeryWide_C$', primitive: panel, size: [400, 50],
+     thickness: 10, group: light, verified: partial, notes: 'two fit side by side on an 8 m wall in public saves'}
+  - {name: sign_display, match: '^Build_StandaloneWidgetSign_Medium_C$', primitive: panel, size: [200, 100],
+     thickness: 10, group: light, verified: unverified}
+  - {name: sign_billboard_small, match: '^Build_StandaloneWidgetSign_Large_C$', primitive: panel, size: [400, 200],
+     thickness: 10, group: light, verified: unverified}
+  - {name: sign_billboard_large, match: '^Build_StandaloneWidgetSign_Huge_C$', primitive: panel, size: [800, 400],
+     thickness: 10, group: light, verified: unverified}
+  - {name: sign_billboard_portrait, match: '^Build_StandaloneWidgetSign_Portrait_C$', primitive: panel, size: [200, 300],
+     thickness: 10, group: light, verified: unverified}
+  - {name: sign_square_2m, match: '^Build_StandaloneWidgetSign_Square_C$', primitive: panel, size: [200, 200],
+     thickness: 10, group: light, verified: unverified}
+  - {name: sign_square_1m, match: '^Build_StandaloneWidgetSign_Square_Small_C$', primitive: panel, size: [100, 100],
+     thickness: 10, group: light, verified: unverified}
+  - {name: sign_square_05m, match: '^Build_StandaloneWidgetSign_Square_Tiny_C$', primitive: panel, size: [50, 50],
+     thickness: 10, group: light, verified: unverified}
+
+  # ------------------------------------------------------------------ deliberately excluded
+  - {name: conveyor_supports, match: '^Build_Conveyor(?:Pole(?:Stackable|Wall)?|CeilingAttachment)_C$', group: exclude,
+     notes: 'belt supports; belts are attached to the surface instead (pipeline: light.attach)'}

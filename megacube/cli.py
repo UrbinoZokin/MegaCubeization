@@ -47,6 +47,19 @@ def cmd_normalize(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_coverage(args: argparse.Namespace) -> int:
+    from .mapping import coverage, load_mapping
+    from .sources.base import open_source
+
+    build = open_source(args.input).read()
+    report = coverage(build, load_mapping(args.classes))
+    print(report.format_text())
+    if args.json:
+        with open(args.json, "w") as fh:
+            json.dump(report.to_dict(), fh, indent=1)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="megacube", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -68,6 +81,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-o", "--output", default="build.json")
     s.add_argument("--bbox", help="keep objects with origin inside xmin,ymin,zmin,xmax,ymax,zmax (game cm)")
     s.set_defaults(func=cmd_normalize)
+
+    s = sub.add_parser("coverage", help="report how the build's classes map to primitives (Phase 2)")
+    s.add_argument("input", help="'synthetic' or a megacube JSON (either frame)")
+    s.add_argument("--classes", help="class mapping YAML (default: config/classes.yaml)")
+    s.add_argument("--json", help="also write the report as JSON")
+    s.set_defaults(func=cmd_coverage)
     return p
 
 
