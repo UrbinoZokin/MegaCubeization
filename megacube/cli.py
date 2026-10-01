@@ -74,9 +74,12 @@ def cmd_build(args: argparse.Namespace) -> int:
     cov = report["coverage"]
     print(f"coverage: {100 * cov['mapped_fraction']:.1f}% mapped, unmapped: {cov['unmapped_classes'] or 'none'}")
     print(f"scale {geo['scale']:.6f} (1 game metre = {geo['scale'] * 1000:.3f} mm); printed size {geo['printed_extent_mm']} mm")
-    for w in geo["warnings"]:
+    for w in geo["warnings"] + report["split"]["warnings"]:
         print(f"WARNING: {w}")
-    print(f"outputs in {args.out}: {', '.join(report['files'].values())}, report.json, coverage.txt")
+    from .pipeline import format_checks
+
+    print(format_checks(report["checks"]))
+    print(f"outputs in {args.out}: {len(report['files'])} STL files, report.json, coverage.txt, printability.txt")
     return 0
 
 

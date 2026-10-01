@@ -138,8 +138,9 @@ def test_shell_thickness_and_core_box(default):
 def test_every_light_element_is_attached_and_lit(default):
     assert default.report["attach"]["floating"] == 0
     assert default.report["windows"] == {"mode": "fill", "made": 7, "skipped": 0}
-    for part in default.light.decompose():  # each light pipe reaches into the cavity
-        assert (part ^ default.cavity).volume() > 0
+    for part in default.light.decompose():  # each light pipe reaches the cavity, flush with its surface
+        assert (part ^ default.cavity).volume() == pytest.approx(0, abs=1e-6)
+        assert part.min_gap(default.cavity, 1.0) < 1e-6  # touches the cavity wall where the pipe ends
 
 
 def test_led_opening_goes_through_the_bottom(default):

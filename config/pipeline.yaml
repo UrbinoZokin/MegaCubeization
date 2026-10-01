@@ -51,12 +51,13 @@ split:
   pin_length: 2.5
   pins_per_edge: 2            # panels: pins per joint; box_lid: one per corner post
   corner_post: 8.0            # box_lid: square posts inside the box corners that carry the pins
-  min_skin: 0.6               # material left between a socket and the outer surface
+  min_skin: 0.8               # material left between a socket and the outer surface (>= checks.min_wall)
 
 checks:
   min_wall: 0.8               # 0.4 mm nozzle: report walls thinner than this ...
   min_gap: 0.4                # ... and gaps narrower than this
-  overhang_deg: 45            # downward faces steeper than this need support
+  overhang_deg: 45            # downward faces steeper than this need support ...
+  overhang_reach: 1.0         # ... unless material one layer below is within this distance (a short ledge)
   samples: 60000              # surface samples for the thickness/gap scan
 
 preview:

@@ -48,6 +48,7 @@ class Geometry:
     alignment: np.ndarray  # 3x3 rotation applied before scaling
     lift_z: float  # printed mm added so the bottom sits at z = 0
     report: dict[str, Any] = field(default_factory=dict)
+    core_box: np.ndarray | None = None  # (2,3) printed mm: the cube's own outer faces (no protrusions)
 
     def groups(self) -> dict[str, Manifold]:
         out = {"body": self.body, "light": self.light}
@@ -335,11 +336,12 @@ def build_geometry(build: Build, mapping: Mapping, cfg: Config, *, split_mode: s
     if roof == "auto":
         roof = "pyramid" if split_mode == "one" else "flat"
     cavity = None
+    core_b = None
     if hc.get("enabled", True):
         wall = float(hc["wall"]) / s
         core = filled
         if hc.get("core", "box") == "box":  # clip to the cube's own faces: protrusions stay solid
-            b = dominant_box(filled)
+            b = core_b = dominant_box(filled)
             core = filled ^ box(b[1] - b[0], b.mean(0))
             rep["core_box_printed_mm"] = (np.ptp(b, axis=0) * s).round(3).tolist()
         cavity = erode(core, wall)
@@ -372,7 +374,9 @@ def build_geometry(build: Build, mapping: Mapping, cfg: Config, *, split_mode: s
     if wc.get("mode", "none") != "none" and cavity is not None and elements:
         windows = _windows(elements, cavity, wc, s, rep, warn)
     if wc.get("mode") == "fill" and not windows.is_empty():
-        light = light + (windows ^ filled)
+        # light pipes end flush with the inner surface: nothing sticks into the cavity, so lids and
+        # panels stay flat (the slot itself overshoots by `margin` for a clean cut)
+        light = light + (windows ^ (filled - cavity))
     body = shell - light - windows
     if dark is not None:
         dark = dark - light - windows
@@ -422,7 +426,10 @@ def build_geometry(build: Build, mapping: Mapping, cfg: Config, *, split_mode: s
                             "window_depth_mm": None if e.window_depth is None else round(e.window_depth * s, 3),
                             "notes": e.notes} for e in elements],
     })
-    return Geometry(s, body, light, dark, placeholders, filled, cavity, centre, A, lift_z, rep)
+    if core_b is None:
+        core_b = dominant_box(filled.scale((1 / s,) * 3).translate((0, 0, -lift_z / s)))
+    core_print = core_b * s + np.array([0.0, 0.0, lift_z])
+    return Geometry(s, body, light, dark, placeholders, filled, cavity, centre, A, lift_z, rep, core_print)
 
 
 def _light_elements(light_objs, world, lc, s, warn) -> list[LightElement]:
