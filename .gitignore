@@ -1,0 +1,8 @@
+__pycache__/
+*.egg-info/
+.pytest_cache/
+node_modules/
+out/
+*.stl
+*.3mf
+!tests/fixtures/*.stl
