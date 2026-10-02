@@ -30,7 +30,10 @@ windows:
 
 hollow:
   enabled: true
-  wall: 3.0                   # shell thickness
+  wall: 3.4                   # shell thickness (the thinnest point; relief on a face only adds to it).
+                              # Raised automatically if the panel joints need more (snap clips: 3.4, reported)
+  cavity: box                 # box: flat inner faces, set back from the deepest point of each face's relief
+                              # (needed by panels and box_lid); follow: constant thickness along the outer surface
   roof: auto                  # auto | flat | pyramid. auto: pyramid for split.mode=one (no internal supports), else flat
   core: box                   # box: hollow only inside the six dominant outer face planes, so things standing
                               # on a face (ramps, walls) stay solid instead of becoming pockets; none: hollow all
@@ -46,19 +49,36 @@ led_opening:
   offset: [0, 0]              # from the centre of the bottom face
 
 split:
-  mode: box_lid               # one | box_lid | panels
-  clearance: 0.15             # per side, pins vs sockets
-  pin_size: 2.0               # box_lid: round pin diameter; panels: diamond pin width (auto-shrunk to fit the wall)
+  mode: panels                # one | box_lid | panels
+  panel_joint: snap           # panels: snap (clips + sliding keys, locks together) | pins (alignment only, glue)
+  clearance: 0.15             # per side, between every connector and its socket/groove
+  min_skin: 0.8               # material left between a socket/pocket and the outer surface (>= checks.min_wall)
+  snap:                       # clips on the top/bottom edges of the four side panels
+    per_edge: 2
+    thickness: 1.6            # clip thickness, printed flat on the bed
+    prong: 1.2                # width of each of the two prongs (they bend sideways, along the layers)
+    split: 1.2                # slot between the prongs
+    barb: 0.6                 # barb size; the catch is barb - clearance
+    neck: 0.8                 # socket neck length = thickness of the lips the barbs hook behind (4 layers)
+    lead_in: 1.0              # ramp at the tip
+    max_strain: 0.02          # sets the prong length (PLA ~0.02, PETG ~0.03)
+    relief: 0.5               # slots around/above the prongs so they can bend
+  keys:                       # sliding tongues on the vertical seams (left/right into front/back)
+    per_edge: 2
+    width: 1.5
+    depth: 1.5
+    length: 12.0
+  pin_size: 2.0               # box_lid: round pin diameter; panels+pins: diamond pin width (auto-shrunk to fit)
   pin_length: 2.5
-  pins_per_edge: 2            # panels: pins per joint; box_lid: one per corner post
+  pins_per_edge: 2            # panels+pins: pins per joint; box_lid: one per corner post
   corner_post: 8.0            # box_lid: square posts inside the box corners that carry the pins
-  min_skin: 0.8               # material left between a socket and the outer surface (>= checks.min_wall)
 
 checks:
   min_wall: 0.8               # 0.4 mm nozzle: report walls thinner than this ...
   min_gap: 0.4                # ... and gaps narrower than this
   overhang_deg: 45            # downward faces steeper than this need support ...
   overhang_reach: 1.0         # ... unless material one layer below is within this distance (a short ledge)
+  bridge_max: 6.0             # ... or it's a flat ceiling spanning at most this much between two walls (a bridge)
   samples: 60000              # surface samples for the thickness/gap scan
 
 preview:

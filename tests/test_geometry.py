@@ -128,11 +128,16 @@ def test_groups_are_clean_solids_that_do_not_overlap(default):
 
 
 def test_shell_thickness_and_core_box(default):
+    w = default.wall
+    assert w == pytest.approx(load_config().get_path("hollow.wall"))
     fx0, fy0, fz0, fx1, fy1, _ = default.filled.bounding_box()
     cx0, cy0, cz0, cx1, cy1, cz1 = default.cavity.bounding_box()
     core = default.report["core_box_printed_mm"]
-    assert (cx0 - fx0, fx1 - cx1, cy0 - fy0, fy1 - cy1, cz0 - fz0) == pytest.approx((3.0,) * 5, abs=1e-6)
-    assert cz1 == pytest.approx(core[2] - 3.0, abs=1e-3)  # under the cube's own top face, not the wall on it
+    assert (cx0 - fx0, fx1 - cx1, cy0 - fy0, fy1 - cy1, cz0 - fz0) == pytest.approx((w,) * 5, abs=1e-6)
+    assert cz1 == pytest.approx(core[2] - w, abs=1e-3)  # under the cube's own top face, not the wall on it
+    sides = default.report["wall"]["per_side_mm"]
+    assert all(lo == pytest.approx(w, abs=1e-3) for lo, _, _ in sides.values())
+    assert sides["+z (top)"][2] > w + 5  # the wall and ramp standing on the top face
 
 
 def test_every_light_element_is_attached_and_lit(default):
@@ -226,6 +231,8 @@ def test_cli_build(tmp_path):
                  "--set", "checks.samples=3000"]) == 0
     report = json.loads((out / "report.json").read_text())
     assert report["geometry"]["scale"] > 0 and (out / "assembled" / "body.stl").stat().st_size > 0
+    wall = report["geometry"]["wall"]  # 2.5 mm is too thin for the snap clips: raised and reported
+    assert wall["configured_mm"] == 2.5 and wall["used_mm"] == pytest.approx(3.4) and wall["raised_for"]
     assert (out / "assembled" / "debug_placeholders.stl").exists() and (out / "coverage.txt").exists()
 
 

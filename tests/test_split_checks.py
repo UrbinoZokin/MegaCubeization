@@ -4,7 +4,7 @@ import json
 
 import numpy as np
 import pytest
-from manifold3d import Manifold
+from manifold3d import Manifold, OpType
 
 from megacube.config import load_config
 from megacube.coords import to_model_frame
@@ -75,6 +75,20 @@ def test_support_classification():
     assert rep["resting_on_other_material_mm2"] == pytest.approx(100, rel=1e-6) and rep["support_on_model_mm2"] == 0
 
 
+def test_flat_ceilings_over_narrow_slots_are_bridges():
+    slab = cube((20, 20, 3), (0, 0, 1.5))
+    over_prong = slab - cube((4, 30, 2), (0, 0, 1)) + cube((1.2, 30, 1.5), (0, 0, 0.75))  # roof over a prong
+    rep, findings = support_report("t", {"body": over_prong}, 45, I4, np.zeros(3))
+    assert rep["bridges_mm2"] > 40 and rep["support_on_model_mm2"] == 0 and not findings
+    block = cube((20, 20, 4), (0, 0, 2))
+    narrow = block - cube((4, 30, 1.5), (0, 0, 2.25))  # closed channel: a floor under its ceiling
+    rep, findings = support_report("t", {"body": narrow}, 45, I4, np.zeros(3), bridge_max=6.0)
+    assert rep["bridges_mm2"] == pytest.approx(80, rel=1e-6) and rep["support_on_model_mm2"] == 0 and not findings
+    wide = block - cube((10, 30, 1.5), (0, 0, 2.25))  # 10 mm: too wide to bridge, needs support on the floor
+    rep, findings = support_report("t", {"body": wide}, 45, I4, np.zeros(3), bridge_max=6.0)
+    assert rep["bridges_mm2"] == 0 and rep["support_on_model_mm2"] > 0 and findings
+
+
 def test_clusters_group_nearby_points():
     pts = np.array([[0, 0, 0], [0.5, 0, 0], [10, 10, 10], [10.4, 10, 10.2]])
     groups = sorted(sorted(g.tolist()) for g in clusters(pts, 1.0))
@@ -82,9 +96,12 @@ def test_clusters_group_nearby_points():
 
 
 # ---------------------------------------------------------------------------- splitting
-@pytest.fixture(scope="module", params=["box_lid", "panels"])
+SPLITS = {"box_lid": ["split.mode=box_lid"], "snap": [], "pins": ["split.panel_joint=pins"]}  # snap: the default
+
+
+@pytest.fixture(scope="module", params=list(SPLITS))
 def split(request):
-    cfg = load_config(overrides=[f"split.mode={request.param}"])
+    cfg = load_config(overrides=SPLITS[request.param])
     geo = build_geometry(to_model_frame(SyntheticCubeSource().read()), MAPPING, cfg)
     parts, rep = split_geometry(geo, cfg)
     return request.param, geo, parts, rep, cfg
@@ -94,14 +111,29 @@ def assembled(part):
     return {g: s.transform(part.to_assembled[:3, :4]) for g, s in part.solids.items()}
 
 
-def test_part_count_and_pins(split):
+def whole(part):
+    return Manifold.batch_boolean(list(assembled(part).values()), OpType.Add)
+
+
+PANELS = ["top", "bottom", "front", "back", "left", "right"]
+
+
+def test_part_count_and_connectors(split):
     mode, _, parts, rep, _ = split
-    names = [p.name for p in parts]
+    names = [p.name for p in parts if p.role == "part"]
     if mode == "box_lid":
         assert names == ["box", "lid"] and rep["pins"]["count"] == 4
+    elif mode == "pins":
+        assert sorted(names) == sorted(PANELS) and rep["pins"]["count"] == 24
     else:
-        assert sorted(names) == sorted(["top", "bottom", "front", "back", "left", "right"])
-        assert rep["pins"]["count"] == 24
+        assert sorted(names) == sorted(PANELS)
+        sn = rep["snap"]
+        assert (sn["clips"], sn["keys"]) == (16, 8)  # 2 per top/bottom edge of 4 side panels, 2 per vertical seam
+        assert not sn["clips_not_placed"] and not sn["seams_without_keys"]
+        by_name = {p.name: p for p in parts}
+        assert all(len(by_name[n].connectors) == 4 for n in ("front", "back"))  # clips
+        assert all(len(by_name[n].connectors) == 8 for n in ("left", "right"))  # clips + keys
+        assert sorted(p.name for p in parts if p.role == "coupon") == ["coupon_clip", "coupon_socket"]
     assert rep["warnings"] == []
 
 
@@ -119,37 +151,54 @@ def test_parts_lie_flat_and_fit(split):
 
 
 def test_reassembled_parts_do_not_overlap(split):
-    """Pins must sit inside sockets with clearance: no two parts may occupy the same space."""
+    """Connectors must sit in their sockets with clearance: no two parts may occupy the same space."""
     _, _, parts, _, _ = split
-    solids = [(p.name, Manifold.batch_boolean(list(assembled(p).values()), __import__("manifold3d").OpType.Add))
-              for p in parts]
+    solids = [(p.name, whole(p)) for p in parts if p.role == "part"]
     for (na, a), (nb, b) in itertools.combinations(solids, 2):
         assert (a ^ b).volume() == pytest.approx(0, abs=1e-4), (na, nb)
 
 
-def test_pins_have_clearance_in_their_sockets(split):
-    """Each pin, put back in the assembly, keeps exactly the configured clearance to its socket."""
-    _, _, parts, rep, cfg = split
+def test_connectors_have_clearance_in_their_sockets(split):
+    """Each pin/clip/key, put back in the assembly, keeps exactly the configured clearance."""
+    mode, _, parts, rep, cfg = split
     c = float(cfg.get_path("split.clearance"))
-    solids = {p.name: Manifold.batch_boolean(list(assembled(p).values()), __import__("manifold3d").OpType.Add)
-              for p in parts}
+    solids = {p.name: whole(p) for p in parts}
     n = 0
     for p in parts:
-        for pin, receiver in p.pins:
-            assert pin.min_gap(solids[receiver], 1.0) == pytest.approx(c, abs=5e-3)  # tapered pins: a hair more
-            n += 1
-    assert n == rep["pins"]["count"] > 0
+        for connector, receiver in p.connectors:
+            assert connector.min_gap(solids[receiver], 1.0) == pytest.approx(c, abs=5e-3)  # tapered pins: a hair more
+            n += p.role == "part"
+    expected = rep["pins"]["count"] if "pins" in rep else rep["snap"]["clips"] + rep["snap"]["keys"]
+    assert n == expected > 0
 
 
 def test_union_of_parts_matches_the_model(split):
     mode, geo, parts, rep, _ = split
-    total = sum(sum(s.volume() for s in p.solids.values()) for p in parts)
+    total = sum(sum(s.volume() for s in p.solids.values()) for p in parts if p.role == "part")
     original = sum(s.volume() for s in geo.groups().values())
     if mode == "box_lid":  # plus the four corner posts that carry the pins
         cx0, cy0, cz0, cx1, cy1, cz1 = geo.cavity.bounding_box()
         original += 4 * rep["pins"]["corner_post_mm"] ** 2 * (cz1 - cz0)
-    # pins add a little, sockets remove a little: within 0.2 % of the model
-    assert total == pytest.approx(original, rel=2e-3)
+    # pins/clips add a little, sockets, relief pockets and key grooves remove a little
+    assert total == pytest.approx(original, rel=2e-3 if mode != "snap" else 5e-3)
+
+
+def test_snap_coupon_is_cut_from_the_panels(split):
+    mode, _, parts, rep, cfg = split
+    if mode != "snap":
+        pytest.skip("snap joints only")
+    by_name = {p.name: p for p in parts}
+    clip_p, sock_p = by_name["coupon_clip"], by_name["coupon_socket"]
+    for p in (clip_p, sock_p):
+        size = p.bbox()[3:] - p.bbox()[:3]
+        assert size[:2].max() <= 25 and size[2] < 10, p.name  # a few minutes to print
+    (clip, receiver), = clip_p.connectors
+    assert receiver == "coupon_socket"
+    assert clip.min_gap(whole(sock_p), 1.0) == pytest.approx(float(cfg.get_path("split.clearance")), abs=1e-6)
+    assert (whole(clip_p) ^ whole(sock_p)).volume() == pytest.approx(0, abs=1e-6)
+    site = rep["snap"]["coupon_site"]
+    panel = by_name[site["panel"]]
+    assert any((clip ^ other).volume() == pytest.approx(clip.volume(), rel=1e-9) for other, _ in panel.connectors)
 
 
 def test_one_piece_uses_a_pyramid_roof():
@@ -171,8 +220,14 @@ def test_one_piece_flat_roof_is_flagged():
 
 
 def test_pipeline_writes_parts_and_checks(tmp_path):
-    report = run("synthetic:n=4", tmp_path, MAPPING, load_config(overrides=["split.mode=panels", "checks.samples=4000"]))
+    report = run("synthetic:n=4", tmp_path, MAPPING, load_config(overrides=["checks.samples=4000"]))
     assert (tmp_path / "printability.txt").exists()
-    assert sorted(report["checks"]["parts"]) == sorted(["top", "bottom", "front", "back", "left", "right"])
+    assert sorted(report["checks"]["parts"]) == sorted(PANELS + ["coupon_clip", "coupon_socket"])
     assert all((tmp_path / f).exists() for f in report["files"].values())
-    assert json.loads((tmp_path / "report.json").read_text())["split"]["pins"]["count"] == 24
+    saved = json.loads((tmp_path / "report.json").read_text())
+    assert saved["split"]["snap"]["clips"] == 16 and saved["split"]["snap"]["assembly"]
+    assert not [f for f in saved["checks"]["findings"] if not f["expected"]]
+    expected = [f for f in saved["checks"]["findings"] if f["expected"]]
+    assert expected and all("barb" in f["expected"] for f in expected)  # the designed thin spots, labelled
+    summary = (tmp_path / "summary.md").read_text()
+    assert "## Assembly" in summary and "snap_coupon.3mf" in summary

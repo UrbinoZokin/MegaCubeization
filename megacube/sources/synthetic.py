@@ -12,6 +12,12 @@ It's built to exercise the pipeline:
 * a wall and a ramp standing on the top face (pivot conventions), conveyor poles (excluded by rule),
   a power pole and a modded class (unmapped: must be reported and placeholdered, not dropped).
 
+``relief=True`` replaces the side-face features with a textured face, roughly as described for the
+real cube (offset foundations, signs outlining the base layer). The arrangement is invented for
+testing: on each side face, a checkerboard of extra foundations offset 50 cm outward on the inner
+cells, one wide sign centred on each border of the base layer, and on the +X face one inner
+foundation recessed 30 cm (a dent the cavity has to stay behind).
+
 All coordinates are in the game frame (cm, left-handed, Z-up), like a real parse.
 """
 from __future__ import annotations
@@ -74,10 +80,11 @@ def hermite_polyline(points, arcs=None):
 class SyntheticCubeSource:
     kind = "synthetic"
 
-    def __init__(self, n: int = 6, foundation: str = "Build_Foundation_8x1_01_C", features: bool = True):
+    def __init__(self, n: int = 6, foundation: str = "Build_Foundation_8x1_01_C", features: bool = True,
+                 relief: bool = False):
         if foundation not in FOUNDATION_HEIGHTS:
             raise ValueError(f"foundation must be one of {sorted(FOUNDATION_HEIGHTS)}")
-        self.n, self.foundation, self.features = int(n), foundation, bool(features)
+        self.n, self.foundation, self.features, self.relief = int(n), foundation, bool(features), bool(relief)
 
     def read(self) -> Build:
         n, h = self.n, FOUNDATION_HEIGHTS[self.foundation]
@@ -90,14 +97,29 @@ class SyntheticCubeSource:
 
         # --- six faces of foundations; each face spans the full cube width (they overlap at edges)
         cells = (np.arange(n) - (n - 1) / 2) * 800.0
+        inner = range(1, n - 1)
+        recess = next(((i, j) for i in inner for j in reversed(inner) if (i + j) % 2), None)
         for normal, x_hint in [((0, 0, 1), (1, 0, 0)), ((0, 0, -1), (1, 0, 0)), ((1, 0, 0), (0, 0, -1)),
                                ((-1, 0, 0), (0, 0, 1)), ((0, 1, 0), (1, 0, 0)), ((0, -1, 0), (1, 0, 0))]:
             rot = frame(normal, x_hint)
-            centre = np.asarray(normal, float) * (half - h / 2)
-            for u in cells:
-                for v in cells:
-                    add(self.foundation, _tf(rot, centre + rot[:, 0] * u + rot[:, 1] * v),
+            nrm = np.asarray(normal, float)
+            centre = nrm * (half - h / 2)
+            side = self.relief and normal[2] == 0
+            for i, u in enumerate(cells):
+                for j, v in enumerate(cells):
+                    sink = 30.0 if side and normal == (1, 0, 0) and (i, j) == recess else 0.0
+                    add(self.foundation, _tf(rot, centre - nrm * sink + rot[:, 0] * u + rot[:, 1] * v),
                         swatch="SwatchDesc_Slot16_C")
+                    if side and i in inner and j in inner and (i + j) % 2 == 0:  # offset foundation
+                        add(self.foundation, _tf(rot, centre + nrm * 50.0 + rot[:, 0] * u + rot[:, 1] * v),
+                            swatch="SwatchDesc_Slot17_C")
+            if side and self.features:  # signs outlining the base layer: one per border, 10 cm off it
+                surface = nrm * (half + 10.0)
+                for along, across in ((0, cells[0]), (0, cells[-1]), (1, cells[0]), (1, cells[-1])):
+                    e = rot[:, along]
+                    pos = surface + rot[:, 1 - along] * across
+                    add("Build_StandaloneWidgetSign_SmallVeryWide_C", _tf(frame(np.cross(e, nrm), e), pos),
+                        props={"role": "outline"})
         if not self.features:
             return self._build(objs, half)
 
@@ -114,17 +136,22 @@ class SyntheticCubeSource:
             spline = [SplinePoint(loc(p - origin), loc(a), loc(lv)) for p, a, lv in pts]
             add(cls, _tf(rot, origin), spline=spline, swatch="SwatchDesc_Slot0_C")
 
-        # Top face, on poles 1 m above the surface.
+        # Top face, on poles 1 m above the surface (the straight one 1.5 cells in from the -Y edge).
         z = top + 100.0
-        add_belt("Build_ConveyorBeltMk5_C", [np.array((-2000.0 * k, -1200.0 * k, z)), np.array((2000.0 * k, -1200.0 * k, z))], (0, 0, 1))
+        yb = -(half - 1200.0)
+        add_belt("Build_ConveyorBeltMk5_C", [np.array((-2000.0 * k, yb, z)), np.array((2000.0 * k, yb, z))], (0, 0, 1))
         for x in (-2000.0 * k, 2000.0 * k):
-            add("Build_ConveyorPole_C", _tf(identity, (x, -1200.0 * k, top)))
+            add("Build_ConveyorPole_C", _tf(identity, (x, yb, top)))
         add_belt("Build_ConveyorBeltMk3_C",
                  [np.array((-2000.0 * k, 400.0 * k, z)), np.array((0.0, 400.0 * k, z)), np.array((800.0 * k, 1200.0 * k, z)),
                   np.array((800.0 * k, 2000.0 * k, z))], (0, 0, 1),
                  arcs={1: {"start_dir": np.array((1.0, 0, 0)), "end_dir": np.array((0, 1.0, 0))}})
         for p in ((-2000.0 * k, 400.0 * k), (800.0 * k, 2000.0 * k)):
             add("Build_ConveyorPole_C", _tf(identity, (*p, top)))
+
+        if self.relief:  # side faces carry the relief instead of the features below
+            self._top_extras(add, identity, top, k, half)
+            return self._build(objs, half)
 
         # +X face: belt lying on the face (SCIM-style rotation, local up = +X), 20 cm off the surface.
         xs = half + 20.0
@@ -143,17 +170,22 @@ class SyntheticCubeSource:
         add("Build_StandaloneWidgetSign_SmallVeryWide_C", _tf(frame((0, 0, 1), (-1, 0, 0)), (1600.0 * k, -half - 10.0, -1200.0 * k)),
             props={"role": "orientation-marker"})
 
-        # Top face decorations: a wall on a foundation edge line, a ramp on a cell (high end at -X).
-        add("Build_Wall_8x4_01_C", _tf(identity, (1600.0 * k, -2000.0 * k, top)))
-        add("Build_Ramp_8x2_01_C", _tf(identity, (-1200.0 * k, -2000.0 * k, top + 100.0)))
+        self._top_extras(add, identity, top, k, half)
+        return self._build(objs, half)
+
+    @staticmethod
+    def _top_extras(add, identity, top, k, half):
+        # Top face decorations in the -Y border row (cell positions from the edge, so they stay on
+        # the face for any n): a wall on a foundation edge line, a ramp on a cell (high end at -X).
+        add("Build_Wall_8x4_01_C", _tf(identity, (half - 800.0, -(half - 400.0), top)))
+        add("Build_Ramp_8x2_01_C", _tf(identity, (-(half - 1200.0), -(half - 400.0), top + 100.0)))
 
         # Unmapped on purpose: must be counted, warned about and placeholdered, never dropped.
         add("Build_PowerPoleMk1_C", _tf(identity, (2000.0 * k, 2000.0 * k, top)))
         add("Build_Wall_10_C", _tf(identity, (-2000.0 * k, 2000.0 * k, top)), type_path="/MoreDecorations/Wall/Build_Wall_10.Build_Wall_10_C")
-        return self._build(objs, half)
 
     def _build(self, objs, half) -> Build:
         return Build(objs, frame="unreal", source={
             "kind": "synthetic", "note": "synthetic test cube, not the user's build",
             "params": {"n": self.n, "foundation": self.foundation, "features": self.features,
-                       "outer_size_cm": 2 * half}})
+                       "relief": self.relief, "outer_size_cm": 2 * half}})

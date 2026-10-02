@@ -10,8 +10,9 @@ Steps:
     debug placeholders (unmapped classes);
  2. union the body (manifold3d batch boolean), fill enclosed voids;
  3. light elements: exaggerate to printable minimums, attach to the surface (raycasts);
- 4. hollow: cavity = erosion of the filled body by the wall thickness (optionally with a
-    self-supporting pyramid roof for one-piece prints), optional dark inner layer;
+ 4. hollow: cavity = erosion of the filled body by the wall thickness, then the largest box inside
+    it (flat inner faces behind any relief on the faces; optionally with a self-supporting pyramid
+    roof for one-piece prints), optional dark inner layer;
  5. windows behind every light element (holes, or light pipes filled with translucent material);
  6. inlay booleans so body, dark and light never overlap; LED/cable opening in the bottom face;
  7. scale to printed mm, bottom at z = 0.
@@ -31,6 +32,7 @@ from .mapping import Mapping
 from .model import Build, quat_to_matrix
 from .primitives import (BoxElement, LightElement, body_primitive, box, hull, make_light_element,
                          placeholder, transform, union)
+from .snap import required_wall
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +51,7 @@ class Geometry:
     lift_z: float  # printed mm added so the bottom sits at z = 0
     report: dict[str, Any] = field(default_factory=dict)
     core_box: np.ndarray | None = None  # (2,3) printed mm: the cube's own outer faces (no protrusions)
+    wall: float | None = None  # printed mm: the thinnest shell wall (hollow.wall, raised if the joints need it)
 
     def groups(self) -> dict[str, Manifold]:
         out = {"body": self.body, "light": self.light}
@@ -128,6 +131,32 @@ def separate_touching(solid: Manifold | None, eps: float = 2e-3) -> tuple[Manifo
     return (Manifold.compose(kept), moved) if moved else (solid, 0)
 
 
+def fix_pinches(solid: Manifold | None, eps: float = 2e-3) -> tuple[Manifold | None, int]:
+    """Where a solid touches itself only along an edge (e.g. two offset foundations meeting corner
+    to corner on a face), manifold3d keeps duplicate vertices, which is valid for it, but in an STL
+    that edge would be shared by four triangles. Fill each such contact with a rod ``eps`` thick
+    (far below print resolution) so the two sides are properly joined. Returns (solid, count)."""
+    if solid is None or solid.is_empty():
+        return solid, 0
+    mesh = solid.to_mesh64()
+    v = np.asarray(mesh.vert_properties)[:, :3]
+    f = np.asarray(mesh.tri_verts, np.int64)
+    uniq, inv, counts = np.unique(v, axis=0, return_inverse=True, return_counts=True)
+    if counts.max() == 1:
+        return solid, 0
+    inv = inv.ravel()
+    edges = np.sort(inv[np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]])], axis=1)
+    pairs, n = np.unique(edges, axis=0, return_counts=True)
+    bad = pairs[n > 2]
+    if not len(bad):
+        return solid, 0
+    rods = []
+    for a, b in bad:
+        pts = np.array([p + np.array(c) * eps for p in (uniq[a], uniq[b]) for c in itertools.product((-1, 1), repeat=3)])
+        rods.append(Manifold.hull_points(pts))
+    return solid + union(rods), len(bad)
+
+
 def fill_voids(solid: Manifold) -> Manifold:
     """Drop enclosed cavities: keep only the positive-volume shells (decompose gives voids as negative)."""
     parts = solid.decompose()
@@ -161,6 +190,94 @@ def dominant_box(solid: Manifold) -> np.ndarray:
                 exact.setdefault(key, float(c))
             box_[side, k] = exact[max(weight, key=weight.get)]
     return box_
+
+
+def inscribed_box(solid: Manifold, grid: int = 16, edge_frac: float = 0.04, max_iter: int = 40) -> np.ndarray | None:
+    """(2,3) axis-aligned box inside ``solid`` (the eroded core) whose faces sit behind the deepest
+    dent on each side, so a textured face still gets a flat inner face.
+
+    1. Per face, rays on a grid over the face (away from its edges, where the neighbouring face's
+       relief would interfere) find where the solid starts; the deepest of these sets the face.
+    2. Anything still outside the solid (a dent between rays, a notch at an edge) is removed by
+       moving in whichever face costs the least, until no part of the box lies outside the solid.
+    Returns None if nothing is left."""
+    if solid.is_empty():
+        return None
+    lo, hi = np.array(solid.bounding_box()).reshape(2, 3)
+    span = hi - lo
+    b = np.vstack([lo, hi])
+    verts = np.asarray(solid.to_mesh64().vert_properties)[:, :3]
+    for k in range(3):
+        i, j = [m for m in range(3) if m != k]
+        gi = np.linspace(lo[i] + edge_frac * span[i], hi[i] - edge_frac * span[i], grid)
+        gj = np.linspace(lo[j] + edge_frac * span[j], hi[j] - edge_frac * span[j], grid)
+        length = 1.02 * span[k]
+        for side, sign in ((0, 1.0), (1, -1.0)):
+            d = np.zeros(3)
+            d[k] = sign
+            hits = []
+            for a, c in itertools.product(gi, gj):
+                o = np.zeros(3)
+                o[i], o[j] = a, c
+                o[k] = lo[k] - 0.01 * span[k] if side == 0 else hi[k] + 0.01 * span[k]
+                h = solid.ray_cast(tuple(o), tuple(o + d * length))
+                if h:
+                    hits.append(o[k] + sign * h[0].distance * length)
+            if hits:
+                b[side, k] = max(hits) if side == 0 else min(hits)
+        coords = np.unique(verts[:, k])  # ray distances carry float noise: snap to the real face
+        for side in (0, 1):
+            near = coords[np.argmin(np.abs(coords - b[side, k]))]
+            if abs(near - b[side, k]) <= 1e-7 * span.max():
+                b[side, k] = near
+    vol_tol = 1e-9 * float(np.prod(span))
+    for _ in range(max_iter):
+        if np.any(b[1] <= b[0]):
+            return None
+        outside = box(b[1] - b[0], b.mean(0)) - solid
+        pieces = [p for p in outside.decompose() if p.volume() > vol_tol]
+        if not pieces:
+            return b
+        new = b.copy()
+        for p in pieces:
+            plo, phi = np.array(p.bounding_box()).reshape(2, 3)
+            moves = [(phi[k] - b[0, k], 0, k) for k in range(3)] + [(b[1, k] - plo[k], 1, k) for k in range(3)]
+            _, side, k = min(moves)
+            if side == 0:
+                new[0, k] = max(new[0, k], phi[k])
+            else:
+                new[1, k] = min(new[1, k], plo[k])
+        b = new
+    return None
+
+
+SIDE_NAMES = {(0, 0): "-x", (0, 1): "+x", (1, 0): "-y", (1, 1): "+y", (2, 0): "-z (bottom)", (2, 1): "+z (top)"}
+
+
+def wall_ranges(filled: Manifold, cavity_box: np.ndarray, grid: int = 9) -> dict[str, list[float]]:
+    """Shell thickness per side, sampled on a grid of rays from the cavity box's faces out
+    through the outer surface: [min, median, max] in the solid's units."""
+    lo, hi = cavity_box
+    out = {}
+    for k in range(3):
+        i, j = [m for m in range(3) if m != k]
+        gi = np.linspace(lo[i], hi[i], grid + 2)[1:-1]
+        gj = np.linspace(lo[j], hi[j], grid + 2)[1:-1]
+        far = 2.0 * float(np.max(hi - lo))
+        for side, sign in ((0, -1.0), (1, 1.0)):
+            d = np.zeros(3)
+            d[k] = sign
+            vals = []
+            for a, c in itertools.product(gi, gj):
+                o = np.zeros(3)
+                o[i], o[j], o[k] = a, c, cavity_box[side, k]
+                for h in filled.ray_cast(tuple(o), tuple(o + d * far)):
+                    if np.dot(h.normal, d) > 0:  # leaving the solid: the outer surface
+                        vals.append(h.distance * far)
+                        break
+            if vals:
+                out[SIDE_NAMES[(k, side)]] = [float(np.min(vals)), float(np.median(vals)), float(np.max(vals))]
+    return out
 
 
 def pyramid_roof(cavity: Manifold) -> Manifold:
@@ -369,16 +486,31 @@ def build_geometry(build: Build, mapping: Mapping, cfg: Config, *, split_mode: s
         roof = "pyramid" if split_mode == "one" else "flat"
     cavity = None
     core_b = None
+    wall_mm = None
     if hc.get("enabled", True):
-        wall = float(hc["wall"]) / s
+        wall_mm = float(hc["wall"])
+        rep["wall"] = {"configured_mm": wall_mm, "used_mm": wall_mm}
+        need = required_wall(cfg, split_mode)
+        if need is not None and wall_mm < need - 1e-9:
+            wall_mm = round(need, 3)
+            rep["wall"].update(used_mm=wall_mm, raised_for="snap clips and keys (split.panel_joint: snap)")
+        wall = wall_mm / s
         core = filled
         if hc.get("core", "box") == "box":  # clip to the cube's own faces: protrusions stay solid
             b = core_b = dominant_box(filled)
             core = filled ^ box(b[1] - b[0], b.mean(0))
             rep["core_box_printed_mm"] = (np.ptp(b, axis=0) * s).round(3).tolist()
         cavity = erode(core, wall)
+        cavity_mode = hc.get("cavity", "box")
+        if not cavity.is_empty() and cavity_mode == "box":  # flat inner faces behind any relief
+            cb = inscribed_box(cavity)
+            cavity = box(cb[1] - cb[0], cb.mean(0)) if cb is not None else Manifold()
+            if cb is not None:
+                rep["wall"]["per_side_mm"] = {k: [round(x * s, 2) for x in v] for k, v in wall_ranges(filled, cb).items()}
+        elif cavity_mode not in ("box", "follow"):
+            raise ValueError(f"hollow.cavity must be box or follow, not {cavity_mode!r}")
         if cavity.is_empty():
-            warn(f"hollowing produced no cavity (wall {hc['wall']} mm too thick for this shape?)")
+            warn(f"hollowing produced no cavity (wall {wall_mm} mm too thick for this shape?)")
             cavity = None
         elif roof == "pyramid":
             cavity = cavity ^ pyramid_roof(cavity)
@@ -392,7 +524,7 @@ def build_geometry(build: Build, mapping: Mapping, cfg: Config, *, split_mode: s
     dark = None
     if dc.get("enabled") and cavity is not None:
         d = float(dc["thickness"]) / s
-        if hc.get("enabled", True) and d >= float(hc["wall"]) / s:
+        if hc.get("enabled", True) and d >= wall_mm / s:
             warn("dark_layer.thickness >= hollow.wall: dark layer disabled")
         else:
             # a lining of thickness d around the cavity (also under a pyramid roof), rest stays body
@@ -450,6 +582,19 @@ def build_geometry(build: Build, mapping: Mapping, cfg: Config, *, split_mode: s
     if separated:
         warn(f"{separated} piece(s) touched the rest only along an edge or point; they were separated by "
              "0.002 mm and will print as loose pieces")
+    # edge contacts inside one solid (offset foundations meeting corner to corner): join them, then
+    # keep the materials apart again (light wins, then dark, then body)
+    light, n_light = fix_pinches(light)
+    if dark is not None:
+        dark, n_dark = fix_pinches(dark)
+        if n_light or n_dark:
+            dark = dark - light
+    else:
+        n_dark = 0
+    body, n_body = fix_pinches(body)
+    if n_light or n_dark or n_body:
+        body = body - light - (dark if dark is not None else Manifold())
+        rep["edge_contacts_joined"] = n_light + n_dark + n_body
     dropped = 0
     body, n = drop_slivers(body, 1e-3)
     dropped += n
@@ -475,7 +620,7 @@ def build_geometry(build: Build, mapping: Mapping, cfg: Config, *, split_mode: s
     if core_b is None:
         core_b = dominant_box(filled.scale((1 / s,) * 3).translate((0, 0, -lift_z / s)))
     core_print = core_b * s + np.array([0.0, 0.0, lift_z])
-    return Geometry(s, body, light, dark, placeholders, filled, cavity, centre, A, lift_z, rep, core_print)
+    return Geometry(s, body, light, dark, placeholders, filled, cavity, centre, A, lift_z, rep, core_print, wall_mm)
 
 
 def _light_elements(light_objs, world, lc, s, warn) -> list[LightElement]:

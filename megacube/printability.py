@@ -4,8 +4,9 @@
   leaves the solid is the local thickness (per material group);
 * narrow gaps: cast a ray outward along +normal; a hit on any solid of the same part closer than
   the limit is a gap the nozzle can't resolve (contact between materials at ~0 distance is fine);
-* supports: downward-facing triangles steeper than the overhang limit, split into "from the
-  plate" (allowed) and "on the model" (internal supports, which the brief forbids);
+* supports: downward-facing triangles steeper than the overhang limit, split into short ledges
+  and bridges (print without support), "from the plate" (allowed) and "on the model" (internal
+  supports, which the brief forbids);
 * bed contact: area of the part's underside lying on the plate.
 
 Flagged samples are clustered into features and reported with their location.
@@ -32,6 +33,7 @@ class Finding:
     location_assembled_mm: list[float]  # in the assembled model
     bbox_mm: list[float]
     face: str = ""
+    expected: str = ""  # set when it lies in a designed feature (e.g. a snap clip's barb): not a defect
 
     def to_dict(self):
         return asdict(self)
@@ -168,8 +170,11 @@ def _points_in_polygons(xy: np.ndarray, polygons) -> np.ndarray:
 
 
 def check_part(name: str, solids: dict[str, Manifold], to_assembled: np.ndarray, assembled_centre,
-               min_wall: float, min_gap: float, samples: int) -> list[Finding]:
-    """Thin walls per material group, narrow gaps across all groups of one printed part."""
+               min_wall: float, min_gap: float, samples: int, zones=None) -> list[Finding]:
+    """Thin walls per material group, narrow gaps across all groups of one printed part.
+
+    ``zones``: (lo, hi, label) boxes in assembled coordinates around designed small features;
+    findings inside one are kept but marked ``expected``."""
     findings = []
     groups = {g: s for g, s in solids.items() if s is not None and not s.is_empty()}
     total_area = sum(s.surface_area() for s in groups.values()) or 1.0
@@ -184,12 +189,36 @@ def check_part(name: str, solids: dict[str, Manifold], to_assembled: np.ndarray,
         narrow = gp < min_gap - 1e-3
         findings += _findings("narrow_gap", name, g, pts[narrow], gp[narrow], max(1.0, 4 * min_gap),
                               to_assembled, assembled_centre)
+    for f in findings:
+        p = np.asarray(f.location_assembled_mm)
+        for lo, hi, label in zones or ():
+            if np.all(p >= np.asarray(lo) - 1e-6) and np.all(p <= np.asarray(hi) + 1e-6):
+                f.expected = label
+                break
     return findings
+
+
+def _bridged(whole: Manifold, p, max_span: float) -> bool:
+    """A flat ceiling point is a bridge if walls on two opposite sides (along X or along Y, just
+    below the ceiling) are at most ``max_span`` apart: the printer spans it without support."""
+    o = np.asarray(p, float)
+    for axis in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)):
+        span = 0.0
+        for sgn in (1.0, -1.0):
+            d = np.asarray(axis) * sgn
+            hits = whole.ray_cast(tuple(o), tuple(o + d * max_span))
+            if not hits:
+                span = np.inf
+                break
+            span += hits[0].distance * max_span
+        if span <= max_span:
+            return True
+    return False
 
 
 def support_report(name: str, solids: dict[str, Manifold], overhang_deg: float, to_assembled, assembled_centre,
                    reach: float = 1.0, layer: float = 0.2, contact: float = 0.05,
-                   bed_tol: float = 0.02) -> tuple[dict, list[Finding]]:
+                   bed_tol: float = 0.02, bridge_max: float = 6.0) -> tuple[dict, list[Finding]]:
     """Classify the downward-facing area of a part in print orientation.
 
     For every triangle facing down more steeply than ``overhang_deg``:
@@ -197,6 +226,8 @@ def support_report(name: str, solids: dict[str, Manifold], overhang_deg: float, 
         ``contact`` mm, so the two print together and nothing overhangs;
       * short ledge: one layer lower there is material within ``reach`` mm horizontally, so the
         printer just extends the perimeter (small ledges on walls print fine without support);
+      * bridge: a flat ceiling with walls on two opposite sides at most ``bridge_max`` mm apart
+        (the roof over a snap clip's prongs, a socket's chamber): printed as a bridge;
       * support from the plate: a support column would reach the build plate (allowed);
       * support on the model: it would have to stand on the part itself. These are the internal
         supports the brief rules out, reported with locations.
@@ -206,7 +237,7 @@ def support_report(name: str, solids: dict[str, Manifold], overhang_deg: float, 
     zmin = min(s.bounding_box()[2] for s in everything)
     whole = Manifold.batch_boolean(everything, __import__("manifold3d").OpType.Add) if len(everything) > 1 else everything[0]
     areas = {"bed_contact_mm2": 0.0, "resting_on_other_material_mm2": 0.0, "short_ledges_mm2": 0.0,
-             "support_from_plate_mm2": 0.0, "support_on_model_mm2": 0.0}
+             "bridges_mm2": 0.0, "support_from_plate_mm2": 0.0, "support_on_model_mm2": 0.0}
     candidates = []
     for s in everything:
         v, f = _mesh(s)
@@ -219,11 +250,11 @@ def support_report(name: str, solids: dict[str, Manifold], overhang_deg: float, 
         on_bed = ok & (n[:, 2] < -0.999) & (np.abs(cen[:, 2] - zmin) < bed_tol)
         areas["bed_contact_mm2"] += float(area[on_bed].sum())
         over = ok & (n[:, 2] < -cos_lim - 1e-6) & ~on_bed
-        candidates += [(cen[i], float(area[i])) for i in np.where(over)[0]]
+        candidates += [(cen[i], float(area[i]), bool(n[i, 2] < -0.996)) for i in np.where(over)[0]]
 
     sections: dict[float, list] = {}
     model_pts, model_areas = [], []
-    for cen, area in candidates:
+    for cen, area, flat in candidates:
         o = cen - np.array([0.0, 0.0, 1e-4])
         seg = o[2] - zmin + 1.0
         firsts = [hs[0] for s in everything if (hs := s.ray_cast(tuple(o), (o[0], o[1], zmin - 1.0)))]
@@ -237,6 +268,8 @@ def support_report(name: str, solids: dict[str, Manifold], overhang_deg: float, 
             sections[zl] = whole.slice(zl).offset(reach, __import__("manifold3d").JoinType.Round).to_polygons() if zl > zmin else []
         if sections[zl] and _points_in_polygons(cen[None, :2], sections[zl])[0]:
             areas["short_ledges_mm2"] += area
+        elif flat and _bridged(whole, cen - np.array([0.0, 0.0, layer / 2]), bridge_max):
+            areas["bridges_mm2"] += area
         elif hits:
             areas["support_on_model_mm2"] += area
             model_pts.append(cen)

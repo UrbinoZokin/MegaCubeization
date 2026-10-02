@@ -138,3 +138,11 @@ def test_full_build_outputs_are_valid(tmp_path, mode):
         files = [f for f in stls if f.startswith(f"parts/{part}_")]
         boxes = np.array([np.r_[read_stl(tmp_path / f)[0].min(0), read_stl(tmp_path / f)[0].max(0)] for f in files])
         assert boxes[:, 2].min() == pytest.approx(0, abs=1e-4)  # part rests on the bed
+    model = ET.fromstring(zipfile.ZipFile(tmp_path / "parts" / "all_parts.3mf").read("3D/3dmodel.model"))
+    n_items = len(model.findall("m:build/m:item", NS))
+    if mode == "panels":  # snap joints: a test coupon, separate from the model's parts
+        assert n_items == 6 and (tmp_path / "parts" / "snap_coupon.3mf").exists()
+        assert (tmp_path / "preview" / "snap_joint.png").stat().st_size > 0
+        assert {"coupon_clip", "coupon_socket"} <= set(report["checks"]["parts"])
+    else:
+        assert n_items == 2 and not (tmp_path / "parts" / "snap_coupon.3mf").exists()

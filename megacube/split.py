@@ -1,16 +1,24 @@
-"""Phase 4: split the scaled model into printable parts, add alignment pins/sockets, orient flat.
+"""Phase 4: split the scaled model into printable parts, add connectors, orient flat.
 
 Modes (``split.mode``):
 
-* ``one``: a single part, printed bottom-down. Pair it with ``hollow.roof: pyramid`` (the
-  default ``roof: auto`` does) so the closed cavity needs no internal supports.
+* ``panels`` (default): six panels, each printed inner face down. Top and bottom are full size,
+  front/back sit between them, left/right between front/back. ``split.panel_joint`` picks the
+  connectors:
+
+  - ``snap`` (default): the four side panels carry snap clips on their top and bottom edges, which
+    lock into sockets in the top and bottom panels. Sliding keys on the left/right panels' vertical
+    edges run in grooves in the front/back panels and keep the vertical seams flush (geometry in
+    megacube/snap.py). Every clip engages with the same downward push, so the assembly is: bottom
+    panel inner face up; press front and back down onto it; slide left and right down between them;
+    press the top on. Clips and keys avoid light pipes and holes by sliding along their edge.
+  - ``pins``: diamond-section alignment pins on every joint (self-supporting 45 degree flanks) and
+    sockets in the neighbouring panel. They only align: glue the panels.
 * ``box_lid``: cut at the cavity ceiling. The box prints upright (open top). The lid is a flat
   plate printed inner face down. Square posts in the box corners carry round pins, and the lid gets
   matching sockets with clearance.
-* ``panels``: six panels with butt joints. Top and bottom are full size, front/back sit between
-  them, left/right between front/back. Each panel prints inner face down. Pins stick out of the
-  joint edges horizontally, so they have a diamond cross-section (self-supporting 45 degree
-  flanks); sockets go into the neighbouring panel's inner face.
+* ``one``: a single part, printed bottom-down. Pair it with ``hollow.roof: pyramid`` (the
+  default ``roof: auto`` does) so the closed cavity needs no internal supports.
 
 All solids of one part share one transform, so their STLs line up in the slicer.
 """
@@ -24,8 +32,9 @@ import numpy as np
 from manifold3d import Manifold
 
 from .config import Config
-from .geometry import Geometry, clean, drop_slivers, separate_touching
+from .geometry import Geometry, clean, drop_slivers, fix_pinches, separate_touching
 from .primitives import box, hull, union
+from .snap import Frame, KeySpec, SnapSpec
 
 log = logging.getLogger(__name__)
 # Cut planes sit 1 micron inside the cavity air, never exactly on a face: cuts that coincide with
@@ -33,6 +42,7 @@ log = logging.getLogger(__name__)
 # The lid/panels then have a 1 micron recess over the cavity, far below one layer.
 EPS = 1e-3
 BIG = 1e4
+FREE_TOL = 1e-3  # mm3 of non-opaque material a connector's keep-out region may contain (booleans' dust)
 
 
 @dataclass
@@ -41,7 +51,11 @@ class Part:
     solids: dict[str, Manifold]  # print orientation, printed mm
     to_print: np.ndarray  # 4x4: assembled -> print coordinates
     notes: list[str] = field(default_factory=list)
-    pins: list[tuple[Manifold, str]] = field(default_factory=list)  # (pin, receiving part), assembled coords
+    # connectors that reach into another part: (solid in assembled coords, receiving part)
+    connectors: list[tuple[Manifold, str]] = field(default_factory=list)
+    role: str = "part"  # part | coupon (a small test piece, not part of the model)
+    # designed small features, (lo, hi, label) in assembled coords: the checks mark findings there as expected
+    zones: list[tuple[np.ndarray, np.ndarray, str]] = field(default_factory=list)
 
     @property
     def to_assembled(self) -> np.ndarray:
@@ -81,6 +95,19 @@ def _settle(m4: np.ndarray, solids: dict[str, Manifold]) -> np.ndarray:
     return t @ m4
 
 
+def _tidy(solids: dict[str, Manifold]) -> dict[str, Manifold]:
+    out = {g: clean(fix_pinches(separate_touching(drop_slivers(s, 1e-3)[0])[0])[0]) for g, s in solids.items()}
+    return {g: s for g, s in out.items() if s is not None and not s.is_empty()}
+
+
+def _make_part(name, solids, rot, connectors=(), role="part", notes=(), zones=()) -> Part | None:
+    solids = _tidy(solids)
+    if not solids:
+        return None
+    m4 = _settle(rot, solids)
+    return Part(name, {g: _apply(m4, s) for g, s in solids.items()}, m4, list(notes), list(connectors), role, list(zones))
+
+
 def round_pin(base, length: float, diameter: float, chamfer: float = 0.3) -> Manifold:
     r = diameter / 2
     body = Manifold.cylinder(max(length - chamfer, 1e-3), r, r, 48)
@@ -112,14 +139,15 @@ class Joint:
 
 
 def _core_and_inner(geo: Geometry, cfg: Config):
-    """Outer core box (cube faces) and inner box (cavity faces), printed mm."""
+    """Outer core box (cube faces), inner box (cavity faces) and the thinnest wall, printed mm."""
     core = geo.core_box if geo.core_box is not None else np.array(geo.filled.bounding_box()).reshape(2, 3)
     if geo.cavity is not None and not geo.cavity.is_empty():
         inner = np.array(geo.cavity.bounding_box()).reshape(2, 3)
     else:
         w = float(cfg.get_path("hollow.wall"))
         inner = core + np.array([[w, w, w], [-w, -w, -w]])
-    return core, inner
+    wall = geo.wall if geo.wall is not None else float(np.min(np.r_[inner[0] - core[0], core[1] - inner[1]]))
+    return core, inner, float(wall)
 
 
 def split_geometry(geo: Geometry, cfg: Config) -> tuple[list[Part], dict]:
@@ -138,8 +166,13 @@ def split_geometry(geo: Geometry, cfg: Config) -> tuple[list[Part], dict]:
         m4 = _settle(np.eye(4), groups)
         return [Part("cube", {g: _apply(m4, s) for g, s in groups.items()}, m4)], rep
 
-    core, inner = _core_and_inner(geo, cfg)
-    wall = float(np.min(np.r_[inner[0] - core[0], core[1] - inner[1]]))
+    core, inner, wall = _core_and_inner(geo, cfg)
+    if mode == "panels" and sc.get("panel_joint", "snap") == "snap":
+        rep["panel_joint"] = "snap"
+        return _snap_panels(groups, inner, wall, cfg, rep, warn)
+    if mode == "panels" and sc.get("panel_joint") != "pins":
+        raise ValueError(f"unknown split.panel_joint {sc.get('panel_joint')!r} (snap | pins)")
+
     clearance, skin = float(sc["clearance"]), float(sc["min_skin"])
     max_len = wall - skin - 0.3  # socket = pin + 0.3 mm must leave `skin` before the outer surface
     pin_len = min(float(sc["pin_length"]), max_len)
@@ -153,7 +186,8 @@ def split_geometry(geo: Geometry, cfg: Config) -> tuple[list[Part], dict]:
     if mode == "box_lid":
         return _box_lid(geo, groups, core, inner, sc, pin_len, clearance, light_guard, rep, warn)
     if mode == "panels":
-        return _panels(groups, core, inner, wall, sc, pin_len, clearance, light_guard, rep, warn)
+        rep["panel_joint"] = "pins"
+        return _pin_panels(groups, core, inner, wall, sc, pin_len, clearance, light_guard, rep, warn)
     raise ValueError(f"unknown split.mode {mode!r} (one | box_lid | panels)")
 
 
@@ -191,21 +225,16 @@ def _box_lid(geo, groups, core, inner, sc, pin_len, clearance, light_guard, rep,
         warn("a lid socket cuts into a light element")
     rep["pins"] = {"count": len(pins), "diameter_mm": pin_d, "length_mm": round(pin_len, 3),
                    "socket_clearance_mm": clearance, "corner_post_mm": post}
-
-    parts = []
-    for name, solids, m4 in (("box", box_solids, np.eye(4)), ("lid", lid_solids, np.eye(4))):
-        solids = {g: clean(separate_touching(drop_slivers(s, 1e-3)[0])[0]) for g, s in solids.items()}
-        solids = {g: s for g, s in solids.items() if s is not None and not s.is_empty()}
-        m4 = _settle(m4, solids)
-        parts.append(Part(name, {g: _apply(m4, s) for g, s in solids.items()}, m4,
-                          pins=[(pin, "lid") for pin in pins] if name == "box" else []))
-    return parts, rep
+    parts = [_make_part("box", box_solids, np.eye(4), [(pin, "lid") for pin in pins]),
+             _make_part("lid", lid_solids, np.eye(4))]
+    return [p for p in parts if p is not None], rep
 
 
 PANEL_INWARD = {"top": (0, 0, -1), "bottom": (0, 0, 1), "front": (0, 1, 0), "back": (0, -1, 0),
                 "left": (1, 0, 0), "right": (-1, 0, 0)}
 PANEL_ROT = {"top": np.eye(4), "bottom": _rot("x", 180), "front": _rot("x", -90), "back": _rot("x", 90),
              "left": _rot("y", 90), "right": _rot("y", -90)}
+PANEL_ORDER = ("top", "bottom", "front", "back", "left", "right")
 
 
 def _panel_regions(inner):
@@ -222,6 +251,195 @@ def _panel_regions(inner):
     }
 
 
+def _split_panels(groups, inner):
+    regions = {k: _region(np.array(lo, float), np.array(hi, float)) for k, (lo, hi) in _panel_regions(inner).items()}
+    return {k: {g: s ^ r for g, s in groups.items()} for k, r in regions.items()}
+
+
+# ------------------------------------------------------------------------------- snap panels
+SIDES = {  # side panel: (axis of its inner face, cavity side (0 = min, 1 = max), outward direction)
+    "front": (1, 0, (0.0, -1.0, 0.0)),
+    "back": (1, 1, (0.0, 1.0, 0.0)),
+    "left": (0, 0, (-1.0, 0.0, 0.0)),
+    "right": (0, 1, (1.0, 0.0, 0.0)),
+}
+ASSEMBLY = [
+    "Lay the bottom panel on the table, inner face up.",
+    "Press the front and back panels down onto it until all their bottom clips click.",
+    "Slide the left and right panels down between them: their keys run in the grooves on the front/back "
+    "panels' inner faces, and their bottom clips click into the bottom panel.",
+    "Put the LED in through the bottom opening if you haven't yet (it stays reachable through it).",
+    "Press the top panel down evenly until all its clips click. The square catches don't release: "
+    "test-fit the snap coupon first.",
+]
+
+
+def _segment_candidates(lo: float, hi: float, step: float):
+    """Positions in [lo, hi], nearest to its middle first."""
+    if hi < lo:
+        return []
+    mid = (lo + hi) / 2
+    n = int((hi - lo) / 2 / step)
+    out = [mid]
+    for i in range(1, n + 1):
+        out += [mid + i * step, mid - i * step]
+    return out
+
+
+def _snap_panels(groups, inner, wall, cfg, rep, warn):  # noqa: C901
+    sc = cfg["split"]
+    spec, keys = SnapSpec.from_config(cfg), KeySpec.from_config(cfg)
+    for msg in spec.problems(float(cfg.get_path("checks.min_gap"))):
+        warn(f"snap clips: {msg}")
+    solids = _split_panels(groups, inner)
+    opaque = union([s for g, s in groups.items() if g != "light"])
+    host = "dark" if "dark" in groups else "body"  # connectors in one filament: the one at the inner face
+
+    def free(*regions) -> bool:
+        return (union(regions) - opaque).volume() < FREE_TOL
+
+    add = {k: [] for k in PANEL_ORDER}  # clips and tongues, assembled coords
+    cut = {k: [] for k in PANEL_ORDER}  # relief pockets, sockets, grooves
+    connectors: dict[str, list] = {k: [] for k in PANEL_ORDER}
+    zones: dict[str, list] = {k: [] for k in PANEL_ORDER}
+    barb = spec.barb_zone()
+    sites: list[dict] = []
+    unplaced, shifted, skipped_seams = [], 0, []
+
+    # --- clips: side panels' top and bottom edges -> sockets in the top/bottom panel
+    need = max(spec.required_wall(), keys.required_wall())
+    n_clips = int(sc["snap"]["per_edge"])
+    if wall < need - 1e-6:
+        warn(f"walls ({wall:.2f} mm) are thinner than the snap clips need ({need:.2f} mm): clips and keys "
+             "skipped. hollow.wall is raised automatically for split.panel_joint=snap; did hollow.enabled=false?")
+        n_clips = 0
+    hx = spec.half_extent()
+    corner = hx + keys.width + 2 * keys.clearance + 2.0  # clear of the panel corners and the key grooves
+    for name, (k, side, out) in SIDES.items():
+        e = 1 - k  # the horizontal axis along the edge
+        span_lo, span_hi = inner[0, e], inner[1, e]
+        for other, a_dir, plane in (("top", 1.0, inner[1, 2] - EPS), ("bottom", -1.0, inner[0, 2] + EPS)):
+            for i in range(n_clips):
+                seg_lo = span_lo + (span_hi - span_lo) * i / n_clips
+                seg_hi = span_lo + (span_hi - span_lo) * (i + 1) / n_clips
+                cands = _segment_candidates(max(seg_lo + hx, span_lo + corner), min(seg_hi - hx, span_hi - corner), hx)
+                placed = None
+                for j, pos in enumerate(cands):
+                    origin = np.zeros(3)
+                    origin[k], origin[e], origin[2] = inner[side, k], pos, plane
+                    f = Frame(origin, np.array([0.0, 0.0, a_dir]), np.array(out))
+                    if free(f.place(spec.keepout_carrier(wall)), f.place(spec.keepout_receiver())):
+                        placed, shifted = f, shifted + (j > 0)
+                        break
+                if placed is None:
+                    unplaced.append(f"{name}/{other} #{i + 1}")
+                    continue
+                clip = placed.place(spec.clip())
+                add[name].append(clip)
+                cut[name].append(placed.place(spec.pocket()))
+                cut[other].append(placed.place(spec.socket()))
+                connectors[name].append((clip, other))
+                zb = np.array(placed.place(barb).bounding_box()).reshape(2, 3)
+                zones[name].append((zb[0], zb[1], "snap clip barb (0.4 mm land: one nozzle line, by design)"))
+                sites.append({"kind": "clip", "panel": name, "into": other, "frame": placed,
+                              "at_mm": placed.origin.round(2).tolist()})
+    if unplaced:
+        warn(f"{len(unplaced)} clip(s) not placed: every position along their edge would cut a light pipe "
+             f"or hole ({', '.join(unplaced)})")
+
+    # --- keys: left/right panels' vertical edges slide down grooves in the front/back panels
+    n_keys = int(sc["keys"]["per_edge"]) if n_clips else 0
+    z_lo, z_hi = inner[0, 2], inner[1, 2]
+    height = z_hi - z_lo
+    for name in ("left", "right"):
+        k, side, out = SIDES[name]
+        u = np.array(out)
+        for other, a_vec, plane in (("front", (0.0, -1.0, 0.0), inner[0, 1] + EPS),
+                                    ("back", (0.0, 1.0, 0.0), inner[1, 1] - EPS)):
+            if n_keys <= 0:
+                break
+            a = np.array(a_vec)
+            seam = Frame(np.array([inner[side, 0], plane, 0.0]), a, u)
+            sgn = float(seam.v[2])  # local v = sgn * z
+            done = False
+            for squeeze in (1.0, 0.7, 0.4):  # move the keys up (shorter groove) if the groove would hit light
+                zs = [z_hi - squeeze * (1 - (i + 0.5) / n_keys) * height for i in range(n_keys)]
+                bottom = min(zs) - keys.length / 2 - keys.clearance
+                v0, v1 = sorted((sgn * bottom, sgn * (z_hi + 1.0)))
+                frames = [Frame(np.array([inner[side, 0], plane, z]), a, u) for z in zs]
+                if not free(seam.place(keys.keepout_receiver(v0, v1)), *[f.place(keys.keepout_carrier(wall)) for f in frames]):
+                    continue
+                cut[other].append(seam.place(keys.groove(v0, v1)))
+                for f in frames:
+                    tongue = f.place(keys.tongue())
+                    add[name].append(tongue)
+                    connectors[name].append((tongue, other))
+                    sites.append({"kind": "key", "panel": name, "into": other, "frame": f,
+                                  "at_mm": f.origin.round(2).tolist()})
+                done = True
+                break
+            if not done:
+                skipped_seams.append(f"{name}/{other}")
+    if skipped_seams:
+        warn(f"no keys on {len(skipped_seams)} vertical seam(s) ({', '.join(skipped_seams)}): their grooves would "
+             "cut a light pipe or hole; those seams are held by the clips only")
+
+    # --- build the parts
+    assembled = {}
+    for name in PANEL_ORDER:
+        sol = dict(solids[name])
+        if cut[name]:
+            cu = union(cut[name])
+            sol = {g: s - cu for g, s in sol.items()}
+        if add[name]:
+            extra = union(add[name])
+            sol = {g: (s + extra if g == host else s - extra) for g, s in sol.items()}
+            if host not in sol:
+                sol[host] = extra
+        assembled[name] = sol
+    parts = [p for p in (_make_part(n, assembled[n], PANEL_ROT[n], connectors[n], zones=zones[n]) for n in PANEL_ORDER) if p]
+
+    clips = [s for s in sites if s["kind"] == "clip"]
+    coupon_site = None
+    if clips:
+        site = next((s for s in clips if s["panel"] == "front" and s["into"] == "top"), clips[0])
+        parts += _coupon(assembled, site, spec, zones[site["panel"]])
+        f = site["frame"]
+        coupon_site = {"panel": site["panel"], "into": site["into"], "origin": f.origin.tolist(), "a": f.a.tolist(),
+                       "u": f.u.tolist(), "clip_thickness_mm": spec.thickness}
+
+    rep["snap"] = {
+        "clips": len(clips), "keys": sum(1 for s in sites if s["kind"] == "key"),
+        "clips_moved_to_dodge_light": shifted, "clips_not_placed": unplaced, "seams_without_keys": skipped_seams,
+        "material": host, "clip": spec.summary(),
+        "key": {"width_mm": keys.width, "depth_mm": keys.depth, "length_mm": keys.length,
+                "required_wall_mm": round(keys.required_wall(), 3)},
+        "clearance_mm": spec.clearance, "wall_mm": round(wall, 3),
+        "sites": [{k: v for k, v in s.items() if k != "frame"} for s in sites],
+        "coupon_site": coupon_site,
+        "assembly": ASSEMBLY,
+    }
+    return parts, rep
+
+
+def _coupon(assembled: dict, site: dict, spec: SnapSpec, zones=()) -> list[Part]:
+    """A small test pair cut from the real panels around one clip: print it first to check the
+    fit (it uses exactly the clip, pocket and socket of the full panels)."""
+    f: Frame = site["frame"]
+    carrier, receiver = site["panel"], site["into"]
+    clip_box = f.place(box((spec.in_length + 7.0 + spec.out_length, 20.0, 60.0),
+                           ((spec.out_length + 1.0 - spec.in_length - 6.0) / 2, 0.0, 28.0)))
+    sock_box = f.place(box((61.0, 20.0, 60.0), (29.5, 0.0, 22.0)))
+    clip_solids = {g: s ^ clip_box for g, s in assembled[carrier].items()}
+    sock_solids = {g: s ^ sock_box for g, s in assembled[receiver].items()}
+    clip = f.place(spec.clip())
+    note = f"cut from the {carrier}/{receiver} joint at {site['at_mm']} (assembled mm)"
+    out = [_make_part("coupon_clip", clip_solids, PANEL_ROT[carrier], [(clip, "coupon_socket")], "coupon", [note], zones),
+           _make_part("coupon_socket", sock_solids, PANEL_ROT[receiver], [], "coupon", [note])]
+    return [p for p in out if p is not None]
+
+
+# ------------------------------------------------------------------------------- pin panels
 def _panel_joints(core, inner) -> list[Joint]:
     (X0, Y0, Z0), (X1, Y1, Z1) = core
     (x0, y0, z0), (x1, y1, z1) = inner
@@ -240,9 +458,8 @@ def _panel_joints(core, inner) -> list[Joint]:
     return joints
 
 
-def _panels(groups, core, inner, wall, sc, pin_len, clearance, light_guard, rep, warn):  # noqa: C901
-    regions = {k: _region(np.array(lo, float), np.array(hi, float)) for k, (lo, hi) in _panel_regions(inner).items()}
-    solids = {k: {g: s ^ r for g, s in groups.items()} for k, r in regions.items()}
+def _pin_panels(groups, core, inner, wall, sc, pin_len, clearance, light_guard, rep, warn):  # noqa: C901
+    solids = _split_panels(groups, inner)
 
     # The pin sits towards the cavity side of the wall, with its socket kept inside the wall's
     # footprint (so the socket never crosses the panel's inner edge) and `min_skin` to the outside:
@@ -251,8 +468,8 @@ def _panels(groups, core, inner, wall, sc, pin_len, clearance, light_guard, rep,
     margin = 0.05
     diag = min(float(sc["pin_size"]), wall - skin - margin - 2 * math.sqrt(2) * clearance)
     n_pins = int(sc["pins_per_edge"])
-    pins: dict[str, list] = {k: [] for k in regions}
-    sockets: dict[str, list] = {k: [] for k in regions}
+    pins: dict[str, list] = {k: [] for k in solids}
+    sockets: dict[str, list] = {k: [] for k in solids}
     unplaced = 0
     if pin_len > 0 and diag >= 0.8 and n_pins > 0:
         sock_diag = diag + 2 * math.sqrt(2) * clearance
@@ -278,17 +495,14 @@ def _panels(groups, core, inner, wall, sc, pin_len, clearance, light_guard, rep,
                    "length_mm": round(pin_len, 3), "socket_clearance_mm": clearance}
 
     parts = []
-    for name in ("top", "bottom", "front", "back", "left", "right"):
+    for name in PANEL_ORDER:
         sol = dict(solids[name])
         if pins[name]:
             sol["body"] = sol["body"] + union([pin for pin, _ in pins[name]])
         if sockets[name]:
             sk = union(sockets[name])
             sol = {g: s - sk for g, s in sol.items()}
-        sol = {g: clean(separate_touching(drop_slivers(s, 1e-3)[0])[0]) for g, s in sol.items()}
-        sol = {g: s for g, s in sol.items() if s is not None and not s.is_empty()}
-        if not sol:
-            continue
-        m4 = _settle(PANEL_ROT[name], sol)
-        parts.append(Part(name, {g: _apply(m4, s) for g, s in sol.items()}, m4, pins=pins[name]))
+        part = _make_part(name, sol, PANEL_ROT[name], pins[name])
+        if part is not None:
+            parts.append(part)
     return parts, rep

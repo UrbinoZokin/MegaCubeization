@@ -75,6 +75,13 @@ def cmd_build(args: argparse.Namespace) -> int:
     cov = report["coverage"]
     print(f"coverage: {100 * cov['mapped_fraction']:.1f}% mapped, unmapped: {cov['unmapped_classes'] or 'none'}")
     print(f"scale {geo['scale']:.6f} (1 game metre = {geo['scale'] * 1000:.3f} mm); printed size {geo['printed_extent_mm']} mm")
+    wall = geo.get("wall") or {}
+    if wall.get("raised_for"):
+        print(f"wall: hollow.wall {wall['configured_mm']} mm raised to {wall['used_mm']} mm for the {wall['raised_for']}")
+    snap = report["split"].get("snap")
+    if snap:
+        print(f"joints: {snap['clips']} snap clips, {snap['keys']} sliding keys; print parts/snap_coupon.3mf first "
+              "to test the fit (assembly steps in summary.md)")
     for w in geo["warnings"] + report["split"]["warnings"]:
         print(f"WARNING: {w}")
     from .pipeline import format_checks

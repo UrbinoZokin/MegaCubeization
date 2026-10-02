@@ -170,9 +170,46 @@ def _layers(solids: dict, extra=None):
     return [lay for lay in out if lay is not None]
 
 
-def write_previews(out_dir, geo, parts, size: int = 700) -> dict[str, str]:
+def joint_sheet(parts, site: dict, size: int = 700) -> Image.Image | None:
+    """Close-up of one snap joint from the coupon pieces: a section through the middle of the clip
+    (barbs hooked behind the socket's lips), the pair pulled apart, and both pieces as printed."""
+    by_name = {p.name: p for p in parts}
+    if "coupon_clip" not in by_name or "coupon_socket" not in by_name or not site:
+        return None
+    clip_p, sock_p = by_name["coupon_clip"], by_name["coupon_socket"]
+    tint = {"body": COLOURS["body"], "light": COLOURS["light"], "dark": COLOURS["dark"]}
+    sock_tint = {"body": COLOURS["pins"], "light": COLOURS["light"], "dark": (40, 70, 110)}
+
+    def placed(p, shift=(0.0, 0.0, 0.0)):
+        return {g: s.transform(p.to_assembled[:3, :4]).translate(tuple(map(float, shift))) for g, s in p.solids.items()}
+
+    a, u = np.asarray(site["a"], float), np.asarray(site["u"], float)
+    o = np.asarray(site["origin"], float)
+    off = float(np.dot(u, o) + site["clip_thickness_mm"] / 2)
+    clip_a, sock_a = placed(clip_p), placed(sock_p)
+    cut = [layer_from_manifold(s.trim_by_plane(tuple(map(float, u)), off), tint.get(g, (150, 150, 150)), g)
+           for g, s in clip_a.items()]
+    cut += [layer_from_manifold(s.trim_by_plane(tuple(map(float, u)), off), sock_tint.get(g, (120, 150, 200)), g)
+            for g, s in sock_a.items()]
+    v = np.cross(u, a)
+    s = (size, size)
+    ims = [render([lay for lay in cut if lay is not None], tuple(-u + 0.25 * v + 0.15 * a), s,
+                  "section through the clip: barbs behind the socket lips (grey: side panel, blue: top/bottom)")]
+    apart = _layers({g: m for g, m in clip_a.items()}) + \
+        [layer_from_manifold(m, sock_tint.get(g, (120, 150, 200)), g) for g, m in placed(sock_p, a * 8.0).items()]
+    ims.append(render([lay for lay in apart if lay is not None], tuple(-u + v * 0.45 - a * 0.5), s,
+                      "pulled apart along the push direction (8 mm), from the cavity side: relief pocket, "
+                      "prongs, socket necks"))
+    a_print = clip_p.to_print[:3, :3] @ a  # the clip's direction on the print bed
+    ims.append(render(_layers(clip_p.solids), tuple(a_print * 1.0 + np.array([0.35, 0.35, 0.9])), s,
+                      "coupon_clip as printed (inner face on the bed, clip lying flat)"))
+    ims.append(render(_layers(sock_p.solids), (0.5, -0.8, -1.0), s, "coupon_socket as printed, from below (socket on the bed)"))
+    return contact_sheet(ims, ["section", "pulled apart", "clip piece", "socket piece"], cols=2)
+
+
+def write_previews(out_dir, geo, parts, size: int = 700, joint: dict | None = None) -> dict[str, str]:
     """Contact sheets: assembled iso views, per-face orthographic views, cut-away, parts in print
-    orientation, and the debug view with unmapped-class placeholders."""
+    orientation, a snap joint close-up, and the debug view with unmapped-class placeholders."""
     from pathlib import Path
 
     out = Path(out_dir)
@@ -202,6 +239,11 @@ def write_previews(out_dir, geo, parts, size: int = 700) -> dict[str, str]:
     ims = [render(_layers(p.solids), (0.6, -1.0, 0.9), s, f"{p.name} (print orientation, bed = z0)") for p in parts]
     contact_sheet(ims, [p.name for p in parts], cols=min(3, len(ims))).save(out / "parts.png")
     files["parts"] = "preview/parts.png"
+
+    sheet = joint_sheet(parts, joint, size) if joint else None
+    if sheet is not None:
+        sheet.save(out / "snap_joint.png")
+        files["snap_joint"] = "preview/snap_joint.png"
 
     if not geo.placeholders.is_empty():
         debug = [layer_from_manifold(geo.body, (215, 216, 218), "body"),
