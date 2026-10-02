@@ -96,6 +96,38 @@ def drop_slivers(solid: Manifold | None, min_volume: float) -> tuple[Manifold | 
     return (Manifold.compose(keep) if keep else Manifold()), len(parts) - len(keep)
 
 
+def clean(solid: Manifold | None, tolerance: float = 1e-6) -> Manifold | None:
+    """Collapse needle/zero-area triangles that booleans leave behind (collinear vertices). Surfaces
+    move by less than ``tolerance`` (printed mm), and the triangle count usually drops too."""
+    if solid is None or solid.is_empty():
+        return solid
+    return solid.simplify(tolerance)
+
+
+def separate_touching(solid: Manifold | None, eps: float = 2e-3) -> tuple[Manifold | None, int]:
+    """Pieces that touch the rest only along an edge or at a point are valid for manifold3d (it
+    keeps duplicate vertices) but turn into non-manifold edges in an STL. Shrink each such piece by
+    ``eps`` (far below print resolution) so it becomes a separate, valid shell. Physically it was
+    never attached anyway."""
+    if solid is None or solid.is_empty():
+        return solid, 0
+    parts = [p for p in solid.decompose()]
+    if len(parts) < 2:
+        return solid, 0
+    parts.sort(key=lambda p: -p.volume())
+    kept, moved = [parts[0]], 0
+    for p in parts[1:]:
+        if p.volume() > 0 and Manifold.compose(kept).min_gap(p, 4 * eps) < eps * 1e-3:
+            lo, hi = np.array(p.bounding_box()).reshape(2, 3)
+            size = np.maximum(hi - lo, 4 * eps)
+            c = (lo + hi) / 2
+            f = tuple(float(x) for x in 1 - 2 * eps / size)
+            p = p.translate(tuple(-c)).scale(f).translate(tuple(c))
+            moved += 1
+        kept.append(p)
+    return (Manifold.compose(kept), moved) if moved else (solid, 0)
+
+
 def fill_voids(solid: Manifold) -> Manifold:
     """Drop enclosed cavities: keep only the positive-volume shells (decompose gives voids as negative)."""
     parts = solid.decompose()
@@ -405,6 +437,19 @@ def build_geometry(build: Build, mapping: Mapping, cfg: Config, *, split_mode: s
     cavity = cavity.translate(up) if cavity is not None else None
     placeholders = placeholders.translate(up)
 
+    separated = 0
+    for name in ("body", "light", "dark"):
+        val, n = separate_touching(locals()[name])
+        separated += n
+        if name == "body":
+            body = val
+        elif name == "light":
+            light = val
+        else:
+            dark = val
+    if separated:
+        warn(f"{separated} piece(s) touched the rest only along an edge or point; they were separated by "
+             "0.002 mm and will print as loose pieces")
     dropped = 0
     body, n = drop_slivers(body, 1e-3)
     dropped += n
@@ -415,6 +460,7 @@ def build_geometry(build: Build, mapping: Mapping, cfg: Config, *, split_mode: s
         dropped += n
     if dropped:
         rep["slivers_removed"] = dropped
+    body, light, dark = clean(body), clean(light), clean(dark)
 
     rep.update({
         "objects": {"body": len(body_objs), "light": len(light_objs), "excluded": len(excluded), "unmapped": len(unmapped)},
@@ -490,6 +536,7 @@ def _choose_inward(e: BoxElement, body: Manifold, max_dist: float) -> None:
 
 def _windows(elements, cavity: Manifold, wc, s, rep, warn) -> Manifold:
     inset = float(wc["inset"]) / s
+    min_width = float(wc.get("min_width", 0.0)) / s
     margin = float(wc["margin"]) / s
     max_depth = float(wc["max_depth"]) / s
     overlap = 0.05 / s
@@ -500,7 +547,7 @@ def _windows(elements, cavity: Manifold, wc, s, rep, warn) -> Manifold:
         per_sample = np.full(idx.max() + 1, np.inf)
         np.minimum.at(per_sample, idx, reach)
         depth = per_sample + margin
-        made = [m for m in e.window_solids(depth, inset, overlap) if m is not None and not m.is_empty()]
+        made = [m for m in e.window_solids(depth, inset, overlap, min_width) if m is not None and not m.is_empty()]
         if made:
             finite = depth[np.isfinite(depth)]
             e.window_depth = float(finite.max())

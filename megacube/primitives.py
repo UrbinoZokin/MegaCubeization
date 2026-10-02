@@ -75,6 +75,19 @@ def placeholder(size_cm) -> Manifold:
 
 
 # ------------------------------------------------------------------------- light elements
+def window_half(half: float, inset: float, min_width: float) -> float:
+    """Half-width of a window behind an element of half-width ``half``: ``inset`` smaller per side,
+    but never narrower than ``min_width`` (a narrower light pipe would be a thin wall itself), as
+    long as the element still overlaps it by a fifth of the inset on each side. Returns 0 when
+    no printable window fits."""
+    want = half - inset
+    if 2 * want >= min_width:
+        return want
+    if 0 < min_width / 2 <= half - 0.2 * inset:
+        return min_width / 2
+    return 0.0
+
+
 def swept_solids(rings: np.ndarray, overlap: float) -> list[Manifold]:
     """A swept profile as one clean tube mesh, or as overlapping convex pieces if it would fold."""
     if len(rings) >= 2 and not tube_folds(rings):
@@ -139,12 +152,12 @@ class SweepElement(LightElement):
         residual = np.where(finite, sample_gap - shift, 0.0)
         self.u_bottom = self.u_bottom - (residual + embed)  # reach the surface everywhere, then sink in
 
-    def window_solids(self, depth: np.ndarray, inset: float, overlap: float) -> list[Manifold]:
+    def window_solids(self, depth: np.ndarray, inset: float, overlap: float, min_width: float = 0.0) -> list[Manifold]:
         """A slot behind the belt, ``inset`` narrower per side, swept like the belt itself.
 
         The depth follows the cavity sample by sample (a single tube mesh, so varying depth is
         safe). Runs of samples where the cavity is out of reach are left without a slot."""
-        hw = self.half_width - inset
+        hw = window_half(self.half_width, inset, min_width)
         ok = np.isfinite(depth)
         if hw <= 0 or not ok.any():
             return []
@@ -214,14 +227,14 @@ class BoxElement(LightElement):
             self.half[k] += grow / 2
             self.centre = self.centre + d * grow / 2
 
-    def window_solids(self, depth: np.ndarray, inset: float, overlap: float) -> list[Manifold]:
+    def window_solids(self, depth: np.ndarray, inset: float, overlap: float, min_width: float = 0.0) -> list[Manifold]:
         finite = depth[np.isfinite(depth)]
         if not len(finite):
             return []
         dmax = float(finite.max())
         k, _ = self.inward
         a, b = [i for i in range(3) if i != k]
-        ha, hb = self.half[a] - inset, self.half[b] - inset
+        ha, hb = window_half(self.half[a], inset, min_width), window_half(self.half[b], inset, min_width)
         if ha <= 0 or hb <= 0:
             return []
         d = self.inward_dir()

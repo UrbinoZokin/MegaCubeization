@@ -103,6 +103,7 @@ class SyntheticCubeSource:
 
         top = half  # top surface height
         identity = np.eye(3)
+        k = half / 2400.0  # the layout below is drawn for n = 6; in-face positions scale with the cube
 
         def add_belt(cls, path, up, arcs=None):
             pts = hermite_polyline(path, arcs)
@@ -115,40 +116,40 @@ class SyntheticCubeSource:
 
         # Top face, on poles 1 m above the surface.
         z = top + 100.0
-        add_belt("Build_ConveyorBeltMk5_C", [np.array((-2000.0, -1200.0, z)), np.array((2000.0, -1200.0, z))], (0, 0, 1))
-        for x in (-2000.0, 2000.0):
-            add("Build_ConveyorPole_C", _tf(identity, (x, -1200.0, top)))
+        add_belt("Build_ConveyorBeltMk5_C", [np.array((-2000.0 * k, -1200.0 * k, z)), np.array((2000.0 * k, -1200.0 * k, z))], (0, 0, 1))
+        for x in (-2000.0 * k, 2000.0 * k):
+            add("Build_ConveyorPole_C", _tf(identity, (x, -1200.0 * k, top)))
         add_belt("Build_ConveyorBeltMk3_C",
-                 [np.array((-2000.0, 400.0, z)), np.array((0.0, 400.0, z)), np.array((800.0, 1200.0, z)),
-                  np.array((800.0, 2000.0, z))], (0, 0, 1),
+                 [np.array((-2000.0 * k, 400.0 * k, z)), np.array((0.0, 400.0 * k, z)), np.array((800.0 * k, 1200.0 * k, z)),
+                  np.array((800.0 * k, 2000.0 * k, z))], (0, 0, 1),
                  arcs={1: {"start_dir": np.array((1.0, 0, 0)), "end_dir": np.array((0, 1.0, 0))}})
-        for p in ((-2000.0, 400.0), (800.0, 2000.0)):
+        for p in ((-2000.0 * k, 400.0 * k), (800.0 * k, 2000.0 * k)):
             add("Build_ConveyorPole_C", _tf(identity, (*p, top)))
 
         # +X face: belt lying on the face (SCIM-style rotation, local up = +X), 20 cm off the surface.
         xs = half + 20.0
         add_belt("Build_ConveyorBeltMk2_C",
-                 [np.array((xs, -1600.0, -1600.0)), np.array((xs, 0.0, 0.0)), np.array((xs, 1600.0, 800.0))], (1, 0, 0))
+                 [np.array((xs, -1600.0 * k, -1600.0 * k)), np.array((xs, 0.0, 0.0)), np.array((xs, 1600.0 * k, 800.0 * k))], (1, 0, 0))
 
         # -X face: conveyor lift running up the face (its centre 150 cm in front of the surface).
-        add("Build_ConveyorLiftMk5_C", _tf(identity, (-half - 150.0, 1200.0, -1600.0)),
-            lift_top=Transform(translation=(0.0, 0.0, 2400.0)))
+        add("Build_ConveyorLiftMk5_C", _tf(identity, (-half - 150.0, 1200.0 * k, -1600.0 * k)),
+            lift_top=Transform(translation=(0.0, 0.0, 2400.0 * k)))
 
         # +Y face: two signs facing +Y (identity rotation: front normal = local +Y), 10 cm off the surface.
-        add("Build_StandaloneWidgetSign_Huge_C", _tf(identity, (-800.0, half + 10.0, 0.0)),
+        add("Build_StandaloneWidgetSign_Huge_C", _tf(identity, (-800.0 * k, half + 10.0, 0.0)),
             props={"text": ["synthetic"]})
-        add("Build_StandaloneWidgetSign_Small_C", _tf(identity, (1600.0, half + 10.0, 1200.0)))
+        add("Build_StandaloneWidgetSign_Small_C", _tf(identity, (1600.0 * k, half + 10.0, 1200.0 * k)))
         # -Y face: orientation marker near the +X edge, lower half. Facing -Y = yaw 180 degrees.
-        add("Build_StandaloneWidgetSign_SmallVeryWide_C", _tf(frame((0, 0, 1), (-1, 0, 0)), (1600.0, -half - 10.0, -1200.0)),
+        add("Build_StandaloneWidgetSign_SmallVeryWide_C", _tf(frame((0, 0, 1), (-1, 0, 0)), (1600.0 * k, -half - 10.0, -1200.0 * k)),
             props={"role": "orientation-marker"})
 
         # Top face decorations: a wall on a foundation edge line, a ramp on a cell (high end at -X).
-        add("Build_Wall_8x4_01_C", _tf(identity, (1600.0, -2000.0, top)))
-        add("Build_Ramp_8x2_01_C", _tf(identity, (-1200.0, -2000.0, top + 100.0)))
+        add("Build_Wall_8x4_01_C", _tf(identity, (1600.0 * k, -2000.0 * k, top)))
+        add("Build_Ramp_8x2_01_C", _tf(identity, (-1200.0 * k, -2000.0 * k, top + 100.0)))
 
         # Unmapped on purpose: must be counted, warned about and placeholdered, never dropped.
-        add("Build_PowerPoleMk1_C", _tf(identity, (2000.0, 2000.0, top)))
-        add("Build_Wall_10_C", _tf(identity, (-2000.0, 2000.0, top)), type_path="/MoreDecorations/Wall/Build_Wall_10.Build_Wall_10_C")
+        add("Build_PowerPoleMk1_C", _tf(identity, (2000.0 * k, 2000.0 * k, top)))
+        add("Build_Wall_10_C", _tf(identity, (-2000.0 * k, 2000.0 * k, top)), type_path="/MoreDecorations/Wall/Build_Wall_10.Build_Wall_10_C")
         return self._build(objs, half)
 
     def _build(self, objs, half) -> Build:

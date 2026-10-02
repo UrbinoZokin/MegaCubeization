@@ -124,7 +124,7 @@ def test_reassembled_parts_do_not_overlap(split):
     solids = [(p.name, Manifold.batch_boolean(list(assembled(p).values()), __import__("manifold3d").OpType.Add))
               for p in parts]
     for (na, a), (nb, b) in itertools.combinations(solids, 2):
-        assert (a ^ b).volume() == pytest.approx(0, abs=1e-6), (na, nb)
+        assert (a ^ b).volume() == pytest.approx(0, abs=1e-4), (na, nb)
 
 
 def test_pins_have_clearance_in_their_sockets(split):

@@ -69,7 +69,8 @@ def cmd_build(args: argparse.Namespace) -> int:
 
     logging.basicConfig(level=logging.INFO if args.verbose else logging.ERROR, format="%(levelname)s %(message)s")
     cfg = load_config(args.config, args.set)
-    report = run(args.input, args.out, load_mapping(args.classes), cfg)
+    report = run(args.input, args.out, load_mapping(args.classes), cfg, previews=not args.no_previews,
+                 validate=not args.no_validate)
     geo = report["geometry"]
     cov = report["coverage"]
     print(f"coverage: {100 * cov['mapped_fraction']:.1f}% mapped, unmapped: {cov['unmapped_classes'] or 'none'}")
@@ -79,8 +80,20 @@ def cmd_build(args: argparse.Namespace) -> int:
     from .pipeline import format_checks
 
     print(format_checks(report["checks"]))
-    print(f"outputs in {args.out}: {len(report['files'])} STL files, report.json, coverage.txt, printability.txt")
-    return 0
+    if "validation" in report:
+        bad = [r for r in report["validation"] if not r["ok"]]
+        print(f"validation: {len(report['validation']) - len(bad)}/{len(report['validation'])} meshes valid"
+              + "".join(f"\n  FAIL {r['file']}" for r in bad))
+    print(f"outputs in {args.out}: summary.md, {len(report['files'])} mesh files, previews in preview/, report.json")
+    return 0 if all(r["ok"] for r in report.get("validation", [])) else 2
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    from .validate import format_reports, validate_file
+
+    reports = [validate_file(f) for f in args.files]
+    print(format_reports(reports))
+    return 0 if all(r.ok for r in reports) else 2
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -119,7 +132,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                    help="override a pipeline setting, e.g. --set hollow.wall=2.4 (repeatable)")
     s.add_argument("-v", "--verbose", action="store_true")
+    s.add_argument("--no-previews", action="store_true", help="skip the PNG previews (faster)")
+    s.add_argument("--no-validate", action="store_true", help="skip mesh validation (faster)")
     s.set_defaults(func=cmd_build)
+
+    s = sub.add_parser("validate", help="check STL files: watertight, winding, normals, self-intersections")
+    s.add_argument("files", nargs="+")
+    s.set_defaults(func=cmd_validate)
     return p
 
 

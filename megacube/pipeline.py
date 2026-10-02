@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import trimesh
 
 from .config import Config
 from .coords import to_model_frame
@@ -16,7 +15,9 @@ from .mapping import Mapping, coverage
 from .model import Build
 from .printability import check_part, support_report
 from .sources.base import open_source
+from .export import write_3mf, write_stl
 from .split import Part, split_geometry
+from .validate import format_reports, validate_file
 
 log = logging.getLogger(__name__)
 
@@ -24,15 +25,6 @@ log = logging.getLogger(__name__)
 def load_build(spec: str) -> Build:
     """Any source spec (synthetic, megacube JSON in either frame, later .sav) -> model frame."""
     return to_model_frame(open_source(spec).read())
-
-
-def to_trimesh(solid) -> trimesh.Trimesh:
-    mesh = solid.to_mesh64()
-    return trimesh.Trimesh(np.asarray(mesh.vert_properties[:, :3], float), np.asarray(mesh.tri_verts, np.int64), process=False)
-
-
-def write_stl(solid, path: Path) -> None:
-    to_trimesh(solid).export(path)
 
 
 def _jsonable(obj: Any):
@@ -98,34 +90,95 @@ def format_checks(checks: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def run(spec: str, out_dir: str | Path, mapping: Mapping, cfg: Config) -> dict[str, Any]:
+def export_all(out: Path, geo: Geometry, parts: list[Part]) -> dict[str, str]:
+    """Assembled STLs, per-part STLs (shared origin per part), per-part and combined 3MF."""
+    files = {}
+    (out / "assembled").mkdir(exist_ok=True)
+    for g, solid in geo.groups().items():
+        files[f"assembled/{g}"] = f"assembled/{g}.stl"
+        write_stl(solid, out / files[f"assembled/{g}"])
+    if not geo.placeholders.is_empty():
+        files["assembled/debug_placeholders"] = "assembled/debug_placeholders.stl"
+        write_stl(geo.placeholders, out / files["assembled/debug_placeholders"])
+    (out / "parts").mkdir(exist_ok=True)
+    for p in parts:
+        for g, solid in p.solids.items():
+            files[f"parts/{p.name}_{g}"] = f"parts/{p.name}_{g}.stl"
+            write_stl(solid, out / files[f"parts/{p.name}_{g}"])
+        files[f"parts/{p.name}.3mf"] = f"parts/{p.name}.3mf"
+        write_3mf([(p.name, p.solids)], out / files[f"parts/{p.name}.3mf"])
+    files["parts/all_parts.3mf"] = "parts/all_parts.3mf"
+    write_3mf([(p.name, p.solids) for p in parts], out / "parts/all_parts.3mf")
+    return files
+
+
+def summary_markdown(report: dict[str, Any]) -> str:
+    g, cov, sp, ck = report["geometry"], report["coverage"], report["split"], report["checks"]
+    val = report.get("validation", [])
+    lines = [f"# megacube build: {report['input']}", ""]
+    src = report.get("source", {})
+    if src.get("kind") == "synthetic":
+        lines += ["> Synthetic test build, not your cube.", ""]
+    lines += ["## Mapping",
+              f"- {cov['total_objects']} objects; mapped by a rule: {100 * cov['mapped_fraction']:.1f}%, "
+              f"printed: {100 * cov['printed_fraction']:.1f}%",
+              f"- unmapped classes: {cov['unmapped_classes'] or 'none'} (placeholders in "
+              "`assembled/debug_placeholders.stl`, `preview/debug_unmapped.png`)" if cov["unmapped_classes"] else
+              "- unmapped classes: none",
+              f"- rules in use that aren't fully verified: {', '.join(cov['not_fully_verified_rules_in_use']) or 'none'}",
+              "", "## Scale and size",
+              f"- scale factor **{g['scale']:.6f}** (1 game metre = {g['scale'] * 1000:.3f} mm); "
+              f"build is {g['model_extent_m']} m in game, printed {g['printed_extent_mm']} mm",
+              f"- shell {report['config']['hollow']['wall']} mm, roof: {g.get('roof')}, windows: "
+              f"{g.get('windows', {}).get('mode', 'none')} ({g.get('windows', {}).get('made', 0)} made, "
+              f"{g.get('windows', {}).get('skipped', 0)} skipped), attach: {g['attach']['mode']} "
+              f"({g['attach']['floating']} floating)", "",
+              f"## Parts ({sp['mode']})"]
+    for name, p in ck["parts"].items():
+        s = p["supports"]
+        lines.append(f"- **{name}** {p['size_mm']} mm, fits: {p['fits_build_volume']}, bed contact {s['bed_contact_mm2']} mm2, "
+                     f"internal supports {s['support_on_model_mm2']} mm2, plate supports {s['support_from_plate_mm2']} mm2, "
+                     f"thin walls {p['thin_walls']}, narrow gaps {p['narrow_gaps']}")
+    if "pins" in sp:
+        lines.append(f"- pins: {sp['pins']}")
+    lines += ["", "## Validation",
+              f"- {sum(1 for r in val if r['ok'])}/{len(val)} STL files valid (watertight, consistent winding, "
+              "outward normals, no degenerate triangles, no self-intersections)"]
+    lines += [f"  - FAIL {r['file']}" for r in val if not r["ok"]]
+    warnings = g["warnings"] + sp["warnings"]
+    if warnings:
+        lines += ["", "## Warnings"] + [f"- {w}" for w in warnings]
+    if report.get("previews"):
+        lines += ["", "## Previews"] + [f"![{k}]({v})" for k, v in report["previews"].items()]
+    lines += ["", "Details: `report.json`, `coverage.txt`, `printability.txt`, `validation.txt`."]
+    return "\n".join(lines) + "\n"
+
+
+def run(spec: str, out_dir: str | Path, mapping: Mapping, cfg: Config, previews: bool = True,
+        validate: bool = True) -> dict[str, Any]:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     build = load_build(spec)
     cov = coverage(build, mapping)
     (out / "coverage.txt").write_text(cov.format_text() + "\n")
     geo: Geometry = build_geometry(build, mapping, cfg)
-
-    files = {}
-    for name, solid in geo.groups().items():
-        path = out / f"assembled_{name}.stl"
-        write_stl(solid, path)
-        files[f"assembled_{name}"] = path.name
-    if not geo.placeholders.is_empty():
-        write_stl(geo.placeholders, out / "debug_placeholders.stl")
-        files["debug_placeholders"] = "debug_placeholders.stl"
-
     parts, split_rep = split_geometry(geo, cfg)
-    part_dir = out / "parts"
-    part_dir.mkdir(exist_ok=True)
-    for p in parts:
-        for g, solid in p.solids.items():
-            write_stl(solid, part_dir / f"{p.name}_{g}.stl")
-            files[f"{p.name}_{g}"] = f"parts/{p.name}_{g}.stl"
     checks = check_parts(parts, geo, cfg)
     (out / "printability.txt").write_text(format_checks(checks) + "\n")
+    files = export_all(out, geo, parts)
 
-    report = {"input": spec, "source": build.source, "coverage": cov.to_dict(), "geometry": geo.report,
-              "split": split_rep, "checks": checks, "files": files}
+    report = {"input": spec, "source": build.source, "config": dict(cfg), "coverage": cov.to_dict(),
+              "geometry": geo.report, "split": split_rep, "checks": checks, "files": files}
+    if validate:
+        reports = [validate_file(out / f) for f in files.values() if f.endswith(".stl")]
+        for r in reports:
+            r.file = str(Path(r.file).relative_to(out))
+        (out / "validation.txt").write_text(format_reports(reports) + "\n")
+        report["validation"] = [r.to_dict() for r in reports]
+    if previews:
+        from .preview import write_previews
+
+        report["previews"] = write_previews(out / "preview", geo, parts, size=int(cfg.get_path("preview.size", 700)))
     (out / "report.json").write_text(json.dumps(_jsonable(report), indent=1))
+    (out / "summary.md").write_text(summary_markdown(report))
     return report

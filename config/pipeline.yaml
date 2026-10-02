@@ -23,7 +23,8 @@ light:
 
 windows:
   mode: fill                  # none | hole (open slot behind the element) | fill (slot filled with translucent material)
-  inset: 0.5                  # window is this much narrower than the element on each side
+  inset: 0.5                  # window is this much narrower than the element on each side ...
+  min_width: 0.8              # ... but never narrower than this (a thinner light pipe is a thin wall itself)
   margin: 0.4                 # window reaches this far past the inner surface
   max_depth: 30.0             # longest light pipe allowed (one-piece pyramid roofs make long ones)
 
@@ -61,5 +62,4 @@ checks:
   samples: 60000              # surface samples for the thickness/gap scan
 
 preview:
-  size: [1000, 1000]
-  views: [iso_ne, iso_sw, iso_nw_low, top]
+  size: 700                   # pixels per view in the PNG contact sheets

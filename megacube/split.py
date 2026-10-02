@@ -24,13 +24,14 @@ import numpy as np
 from manifold3d import Manifold
 
 from .config import Config
-from .geometry import Geometry, drop_slivers
+from .geometry import Geometry, clean, drop_slivers, separate_touching
 from .primitives import box, hull, union
 
 log = logging.getLogger(__name__)
-# Cut planes lie exactly on the cavity faces. manifold3d resolves the coplanar cuts cleanly;
-# nudging them into the cavity instead left 1e-4 mm steps that broke the thin-wall check.
-EPS = 0.0
+# Cut planes sit 1 micron inside the cavity air, never exactly on a face: cuts that coincide with
+# the cavity ceiling can leave zero-thickness flaps (overlapping up/down faces) after the boolean.
+# The lid/panels then have a 1 micron recess over the cavity, far below one layer.
+EPS = 1e-3
 BIG = 1e4
 
 
@@ -193,7 +194,7 @@ def _box_lid(geo, groups, core, inner, sc, pin_len, clearance, light_guard, rep,
 
     parts = []
     for name, solids, m4 in (("box", box_solids, np.eye(4)), ("lid", lid_solids, np.eye(4))):
-        solids = {g: drop_slivers(s, 1e-3)[0] for g, s in solids.items()}
+        solids = {g: clean(separate_touching(drop_slivers(s, 1e-3)[0])[0]) for g, s in solids.items()}
         solids = {g: s for g, s in solids.items() if s is not None and not s.is_empty()}
         m4 = _settle(m4, solids)
         parts.append(Part(name, {g: _apply(m4, s) for g, s in solids.items()}, m4,
@@ -243,11 +244,12 @@ def _panels(groups, core, inner, wall, sc, pin_len, clearance, light_guard, rep,
     regions = {k: _region(np.array(lo, float), np.array(hi, float)) for k, (lo, hi) in _panel_regions(inner).items()}
     solids = {k: {g: s ^ r for g, s in groups.items()} for k, r in regions.items()}
 
-    # The pin sits against the cavity side of the wall; the socket in the neighbouring panel then
-    # only needs `min_skin` towards the outside (the inner side is solid panel), so:
-    #   pin diagonal + sqrt(2) * clearance + skin <= wall
+    # The pin sits towards the cavity side of the wall, with its socket kept inside the wall's
+    # footprint (so the socket never crosses the panel's inner edge) and `min_skin` to the outside:
+    #   margin + socket diagonal + skin <= wall, socket diagonal = pin diagonal + 2*sqrt(2)*clearance
     skin = float(sc["min_skin"])
-    diag = min(float(sc["pin_size"]), wall - skin - math.sqrt(2) * clearance)
+    margin = 0.05
+    diag = min(float(sc["pin_size"]), wall - skin - margin - 2 * math.sqrt(2) * clearance)
     n_pins = int(sc["pins_per_edge"])
     pins: dict[str, list] = {k: [] for k in regions}
     sockets: dict[str, list] = {k: [] for k in regions}
@@ -259,7 +261,7 @@ def _panels(groups, core, inner, wall, sc, pin_len, clearance, light_guard, rep,
             for f in want:
                 placed = False
                 for shift in (0.0, 0.08, -0.08, 0.16, -0.16):  # slide along the edge to dodge light
-                    base = j.base + j.v * (f + shift) * j.edge_len * 0.9 + j.u * (diag / 2)
+                    base = j.base + j.v * (f + shift) * j.edge_len * 0.9 + j.u * (margin + sock_diag / 2)
                     sock = diamond_pin(base, j.axis, j.u, j.v, sock_diag, pin_len + 0.3, taper=1.0)
                     if (sock ^ light_guard).volume() > 1e-6:
                         continue
@@ -283,7 +285,7 @@ def _panels(groups, core, inner, wall, sc, pin_len, clearance, light_guard, rep,
         if sockets[name]:
             sk = union(sockets[name])
             sol = {g: s - sk for g, s in sol.items()}
-        sol = {g: drop_slivers(s, 1e-3)[0] for g, s in sol.items()}
+        sol = {g: clean(separate_touching(drop_slivers(s, 1e-3)[0])[0]) for g, s in sol.items()}
         sol = {g: s for g, s in sol.items() if s is not None and not s.is_empty()}
         if not sol:
             continue

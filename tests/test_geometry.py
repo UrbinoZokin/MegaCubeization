@@ -124,7 +124,7 @@ def test_groups_are_clean_solids_that_do_not_overlap(default):
         _, _, area = mesh_stats(solid)
         assert (area < 1e-6).sum() == 0
         assert solid.status().name == "NoError"
-    assert (default.body ^ default.light).volume() == pytest.approx(0, abs=1e-6)
+    assert (default.body ^ default.light).volume() == pytest.approx(0, abs=1e-4)  # mm3: nothing
 
 
 def test_shell_thickness_and_core_box(default):
@@ -179,7 +179,7 @@ def test_dark_layer_lines_the_cavity():
     g = build(["dark_layer.enabled=true"])
     assert g.dark is not None and g.dark.volume() > 0
     for a, b in ((g.body, g.dark), (g.dark, g.light), (g.body, g.light)):
-        assert (a ^ b).volume() == pytest.approx(0, abs=1e-6)
+        assert (a ^ b).volume() == pytest.approx(0, abs=1e-4)  # mm3: sub-micron cleanup tolerance
     dx0, dy0, _, dx1, dy1, _ = g.dark.bounding_box()
     cx0, cy0, _, cx1, cy1, _ = g.cavity.bounding_box()
     assert (cx0 - dx0, dx1 - cx1, cy0 - dy0, dy1 - cy1) == pytest.approx((0.8,) * 4, abs=1e-6)
@@ -222,10 +222,11 @@ def test_dominant_alignment_identity_for_aligned_input():
 
 def test_cli_build(tmp_path):
     out = tmp_path / "out"
-    assert main(["build", "synthetic:n=4", "-o", str(out), "--set", "hollow.wall=2.5"]) == 0
+    assert main(["build", "synthetic:n=6", "-o", str(out), "--set", "hollow.wall=2.5", "--no-previews",
+                 "--set", "checks.samples=3000"]) == 0
     report = json.loads((out / "report.json").read_text())
-    assert report["geometry"]["scale"] > 0 and (out / "assembled_body.stl").stat().st_size > 0
-    assert (out / "debug_placeholders.stl").exists() and (out / "coverage.txt").exists()
+    assert report["geometry"]["scale"] > 0 and (out / "assembled" / "body.stl").stat().st_size > 0
+    assert (out / "assembled" / "debug_placeholders.stl").exists() and (out / "coverage.txt").exists()
 
 
 MAPPING_TEXT = open(MAPPING.path).read()

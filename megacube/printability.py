@@ -42,16 +42,21 @@ def _mesh(solid: Manifold):
     return np.asarray(m.vert_properties)[:, :3], np.asarray(m.tri_verts, np.int64)
 
 
-def surface_samples(solid: Manifold, n_target: int, rng=None):
+def surface_samples(solid: Manifold, n_target: int, rng=None, min_altitude: float = 5e-3):
     """Every triangle's centroid (so small features are never skipped) plus area-weighted
-    random points up to ``n_target``. Returns points, unit normals."""
+    random points up to ``n_target``. Returns points, unit normals.
+
+    Triangles narrower than ``min_altitude`` mm (sub-resolution strips such as the 1 micron step
+    a cut leaves at a panel's inner edge) are not sampled: nothing that thin can print, and real
+    thin walls always have full-size faces that do get sampled."""
     v, f = _mesh(solid)
     if not len(f):
         return np.zeros((0, 3)), np.zeros((0, 3))
     a, b, c = v[f[:, 0]], v[f[:, 1]], v[f[:, 2]]
     n = np.cross(b - a, c - a)
     area = np.linalg.norm(n, axis=1) / 2
-    ok = area > 1e-12
+    longest = np.max(np.linalg.norm(np.stack([b - a, c - b, a - c], 1), axis=2), axis=1)
+    ok = (area > 1e-12) & (2 * area / np.maximum(longest, 1e-30) >= min_altitude)
     a, b, c, n, area = a[ok], b[ok], c[ok], n[ok], area[ok]
     n = n / (2 * area[:, None])
     pts, nrm = [(a + b + c) / 3], [n]
@@ -184,7 +189,7 @@ def check_part(name: str, solids: dict[str, Manifold], to_assembled: np.ndarray,
 
 def support_report(name: str, solids: dict[str, Manifold], overhang_deg: float, to_assembled, assembled_centre,
                    reach: float = 1.0, layer: float = 0.2, contact: float = 0.05,
-                   bed_tol: float = 1e-2) -> tuple[dict, list[Finding]]:
+                   bed_tol: float = 0.02) -> tuple[dict, list[Finding]]:
     """Classify the downward-facing area of a part in print orientation.
 
     For every triangle facing down more steeply than ``overhang_deg``:
