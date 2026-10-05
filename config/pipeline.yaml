@@ -1,0 +1,85 @@
+# Pipeline parameters. Lengths are PRINTED millimetres unless the key says otherwise.
+# Override any value on the command line: --set hollow.wall=2.4 --set split.mode=panels
+
+scale:
+  max_dimension: 240          # longest side of the assembled model (mm)
+  build_volume: [256, 256, 256]  # Bambu X1C
+
+align: none                   # none | auto: rotate so the dominant building axes line up with X/Y/Z
+snap:                         # clean up float noise on structural pieces so touching faces coincide exactly
+  position_cm: 1.0            # round positions to this grid (game cm, relative to the first piece); 0 = off
+  rotation_deg: 0.05          # snap rotations within this angle of a 90-degree orientation; 0 = off
+weld_model_mm: 0.0            # TRUE-SCALE mm (1 game cm = 10 mm) to grow structural pieces by. Only for
+                              # real gaps that snapping can't close; overlapping faces leave sliver triangles
+
+light:
+  min_width: 1.2              # belts/lifts/signs are exaggerated up to these printed sizes
+  min_thickness: 0.8
+  attach: snap                # none | snap (move onto the surface) | extend (grow down to the surface)
+  attach_max_gap: 8.0         # elements farther than this from the body are left alone (warning)
+  embed: 0.3                  # sink attached elements into the body so the two materials interlock
+  spline_max_segment: 1.0     # belt sampling: max printed segment length ...
+  spline_max_angle_deg: 6     # ... and max turn per segment
+
+windows:
+  mode: fill                  # none | hole (open slot behind the element) | fill (slot filled with translucent material)
+  inset: 0.5                  # window is this much narrower than the element on each side ...
+  min_width: 0.8              # ... but never narrower than this (a thinner light pipe is a thin wall itself)
+  margin: 0.4                 # window reaches this far past the inner surface
+  max_depth: 30.0             # longest light pipe allowed (one-piece pyramid roofs make long ones)
+
+hollow:
+  enabled: true
+  wall: 3.4                   # shell thickness (the thinnest point; relief on a face only adds to it).
+                              # Raised automatically if the panel joints need more (snap clips: 3.4, reported)
+  cavity: box                 # box: flat inner faces, set back from the deepest point of each face's relief
+                              # (needed by panels and box_lid); follow: constant thickness along the outer surface
+  roof: auto                  # auto | flat | pyramid. auto: pyramid for split.mode=one (no internal supports), else flat
+  core: box                   # box: hollow only inside the six dominant outer face planes, so things standing
+                              # on a face (ramps, walls) stay solid instead of becoming pockets; none: hollow all
+
+dark_layer:
+  enabled: false              # inner part of the shell in a dark filament to stop light bleeding through walls
+  thickness: 0.8
+
+led_opening:
+  enabled: true
+  shape: circle               # circle | rect
+  size: [40, 40]              # diameter (circle) or width x depth (rect)
+  offset: [0, 0]              # from the centre of the bottom face
+
+split:
+  mode: panels                # one | box_lid | panels
+  panel_joint: snap           # panels: snap (clips + sliding keys, locks together) | pins (alignment only, glue)
+  clearance: 0.15             # per side, between every connector and its socket/groove
+  min_skin: 0.8               # material left between a socket/pocket and the outer surface (>= checks.min_wall)
+  snap:                       # clips on the top/bottom edges of the four side panels
+    per_edge: 2
+    thickness: 1.6            # clip thickness, printed flat on the bed
+    prong: 1.2                # width of each of the two prongs (they bend sideways, along the layers)
+    split: 1.2                # slot between the prongs
+    barb: 0.6                 # barb size; the catch is barb - clearance
+    neck: 0.8                 # socket neck length = thickness of the lips the barbs hook behind (4 layers)
+    lead_in: 1.0              # ramp at the tip
+    max_strain: 0.02          # sets the prong length (PLA ~0.02, PETG ~0.03)
+    relief: 0.5               # slots around/above the prongs so they can bend
+  keys:                       # sliding tongues on the vertical seams (left/right into front/back)
+    per_edge: 2
+    width: 1.5
+    depth: 1.5
+    length: 12.0
+  pin_size: 2.0               # box_lid: round pin diameter; panels+pins: diamond pin width (auto-shrunk to fit)
+  pin_length: 2.5
+  pins_per_edge: 2            # panels+pins: pins per joint; box_lid: one per corner post
+  corner_post: 8.0            # box_lid: square posts inside the box corners that carry the pins
+
+checks:
+  min_wall: 0.8               # 0.4 mm nozzle: report walls thinner than this ...
+  min_gap: 0.4                # ... and gaps narrower than this
+  overhang_deg: 45            # downward faces steeper than this need support ...
+  overhang_reach: 1.0         # ... unless material one layer below is within this distance (a short ledge)
+  bridge_max: 6.0             # ... or it's a flat ceiling spanning at most this much between two walls (a bridge)
+  samples: 60000              # surface samples for the thickness/gap scan
+
+preview:
+  size: 700                   # pixels per view in the PNG contact sheets
